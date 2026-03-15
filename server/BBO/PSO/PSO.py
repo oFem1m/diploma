@@ -37,9 +37,11 @@ class PSOConfig:
 
 
 class PSO:
-    def __init__(self, config: PSOConfig, objective: Callable[[np.ndarray], float]):
+    def __init__(self, config: PSOConfig, objective: Callable[[np.ndarray], float],
+                 on_progress: Optional[Callable] = None):
         self.cfg = config
         self.objective = objective
+        self.on_progress = on_progress
         self.rng = np.random.default_rng(config.random_seed)
         self.low = np.array([a for a, _ in self.cfg.bounds], dtype=float)
         self.high = np.array([b for _, b in self.cfg.bounds], dtype=float)
@@ -89,6 +91,15 @@ class PSO:
                 gbest_pos = pbest_pos[g_idx].copy()
 
             history_best.append(gbest_fit)
+
+            if self.on_progress:
+                self.on_progress({
+                    "iteration": t,
+                    "max_iterations": self.cfg.max_generations,
+                    "best_f": gbest_fit,
+                    "best_x": gbest_pos.tolist(),
+                    "history_best_f_tail": history_best[-10:],
+                })
 
         return {
             "best_x": gbest_pos.copy(),

@@ -34,9 +34,11 @@ class BBOConfig:
 
 
 class ClassicBBO:
-    def __init__(self, config: BBOConfig, objective: Callable[[np.ndarray], float]):
+    def __init__(self, config: BBOConfig, objective: Callable[[np.ndarray], float],
+                 on_progress: Optional[Callable] = None):
         self.cfg = config
         self.objective = objective
+        self.on_progress = on_progress
         self.rng = np.random.default_rng(config.random_seed)
         self.low = np.array([a for a, _ in self.cfg.bounds], dtype=float)
         self.high = np.array([b for _, b in self.cfg.bounds], dtype=float)
@@ -90,6 +92,15 @@ class ClassicBBO:
                 fit_Z[worst_idx] = elites_f
 
             X, fitness = Z, fit_Z
+
+            if self.on_progress:
+                self.on_progress({
+                    "iteration": gen,
+                    "max_iterations": self.cfg.max_generations,
+                    "best_f": best_f,
+                    "best_x": best_x.tolist(),
+                    "history_best_f_tail": hist_best[-10:],
+                })
 
         order = np.argsort(fitness)
         X, fitness = X[order], fitness[order]
