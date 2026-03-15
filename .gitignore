@@ -1,0 +1,104 @@
+# =========================
+# OS / editor junk
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# JetBrains IDE
+# =========================
+.idea/
+*.iml
+out/
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+*.secret
+*.key
+
+# =========================
+# Python: server
+# =========================
+server/.venv/
+server/venv/
+server/env/
+server/__pycache__/
+server/**/*.pyc
+server/**/*.pyo
+server/**/*.pyd
+server/.pytest_cache/
+server/.mypy_cache/
+server/.ruff_cache/
+server/.coverage
+server/htmlcov/
+server/.tox/
+server/.nox/
+
+# If using build tools
+server/build/
+server/dist/
+server/*.egg-info/
+
+# Jupyter
+server/.ipynb_checkpoints/
+
+# =========================
+# Flutter / Dart: mobile
+# =========================
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/.packages
+mobile/build/
+
+# Flutter / Dart generated
+mobile/pubspec_overrides.yaml
+
+# =========================
+# Android inside Flutter
+# =========================
+mobile/android/.gradle/
+mobile/android/captures/
+mobile/android/local.properties
+mobile/android/**/GeneratedPluginRegistrant.java
+
+# Keystore / signing
+*.jks
+*.keystore
+
+# =========================
+# iOS / macOS Flutter generated
+# =========================
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+mobile/ios/Flutter/ephemeral/
+mobile/macos/Pods/
+mobile/macos/Flutter/ephemeral/
+
+# =========================
+# Linux / Windows generated
+# =========================
+mobile/linux/flutter/ephemeral/
+mobile/windows/flutter/ephemeral/
+
+# =========================
+# Coverage
+# =========================
+coverage/
+mobile/coverage/
+server/coverage/
+
+# =========================
+# Optional generated docs / temp
+# =========================
+tmp/
+temp/
