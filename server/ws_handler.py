@@ -158,16 +158,31 @@ class ConnectionHandler:
             await self._send_error("BAD_REQUEST", str(e), reply_to=envelope.header.msg_id)
             return
 
+        job = self.job_queue.get_job(payload.job_id)
+        if not job:
+            await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        was_queued = job.state.value == "queued"
         success = self.job_queue.cancel(payload.job_id)
         if not success:
-            job = self.job_queue.get_job(payload.job_id)
-            if not job:
-                await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
-                                       reply_to=envelope.header.msg_id)
-            else:
-                await self._send_error("JOB_ALREADY_FINISHED",
-                                       f"job {payload.job_id} already in state {job.state.value}",
-                                       reply_to=envelope.header.msg_id)
+            await self._send_error("JOB_ALREADY_FINISHED",
+                                   f"job {payload.job_id} already in state {job.state.value}",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        if was_queued:
+            trace = {
+                "client_req_id": job.client_req_id,
+                "job_id": job.job_id,
+                "span_id": None,
+            }
+            await self._send("job.finished", {
+                "job_id": job.job_id,
+                "final_state": "cancelled",
+                "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            }, reply_to=envelope.header.msg_id, trace=trace)
 
     async def _handle_status_get(self, envelope):
         try:
