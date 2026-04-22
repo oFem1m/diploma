@@ -16,6 +16,7 @@ class ProgressState extends Equatable {
   final double? bestF;
   final List<double>? bestX;
   final List<double> historyBestF;
+  final List<List<double>> historyBestX;
   final int elapsedMs;
   final int? queuePosition;
   final int? queueEtaMs;
@@ -30,6 +31,7 @@ class ProgressState extends Equatable {
     this.bestF,
     this.bestX,
     this.historyBestF = const [],
+    this.historyBestX = const [],
     this.elapsedMs = 0,
     this.queuePosition,
     this.queueEtaMs,
@@ -45,6 +47,7 @@ class ProgressState extends Equatable {
     double? bestF,
     List<double>? bestX,
     List<double>? historyBestF,
+    List<List<double>>? historyBestX,
     int? elapsedMs,
     int? queuePosition,
     int? queueEtaMs,
@@ -59,6 +62,7 @@ class ProgressState extends Equatable {
       bestF: bestF ?? this.bestF,
       bestX: bestX ?? this.bestX,
       historyBestF: historyBestF ?? this.historyBestF,
+      historyBestX: historyBestX ?? this.historyBestX,
       elapsedMs: elapsedMs ?? this.elapsedMs,
       queuePosition: queuePosition ?? this.queuePosition,
       queueEtaMs: queueEtaMs ?? this.queueEtaMs,
@@ -73,7 +77,7 @@ class ProgressState extends Equatable {
   @override
   List<Object?> get props => [
         phase, jobId, iteration, maxIterations, bestF,
-        historyBestF.length, elapsedMs, queuePosition, result, errorMessage,
+        historyBestF.length, historyBestX.length, elapsedMs, queuePosition, result, errorMessage,
       ];
 }
 
@@ -118,6 +122,11 @@ class ProgressCubit extends Cubit<ProgressState> {
         } else {
           newHistory.add(data.progress.bestF);
         }
+        // Accumulate best X positions for 3D path visualization
+        final newHistoryX = List<List<double>>.from(state.historyBestX);
+        if (data.progress.bestX != null) {
+          newHistoryX.add(List<double>.from(data.progress.bestX!));
+        }
         emit(state.copyWith(
           phase: JobPhase.running,
           iteration: data.progress.iteration,
@@ -125,6 +134,7 @@ class ProgressCubit extends Cubit<ProgressState> {
           bestF: data.progress.bestF,
           bestX: data.progress.bestX,
           historyBestF: newHistory,
+          historyBestX: newHistoryX,
           elapsedMs: data.progress.elapsedMs,
         ));
       case WsJobResult(:final data):

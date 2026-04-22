@@ -11,17 +11,20 @@ import '../configuration/config_screen.dart';
 import '../history/history_screen.dart';
 import 'convergence_chart.dart';
 import 'contour_map.dart';
+import 'surface_3d_screen.dart';
 
 class ResultsScreen extends StatefulWidget {
   final JobResult result;
   final JobConfig config;
   final ServerCapabilities capabilities;
+  final List<List<double>> historyBestX;
 
   const ResultsScreen({
     super.key,
     required this.result,
     required this.config,
     required this.capabilities,
+    this.historyBestX = const [],
   });
 
   @override
@@ -214,6 +217,15 @@ class _ResultsScreenState extends State<ResultsScreen> {
                     : const Icon(Icons.gif_box),
                 label: Text(_gifGenerating ? 'Генерация GIF...' : 'Сгенерировать GIF'),
               ),
+              const SizedBox(height: 8),
+              FilledButton.icon(
+                onPressed: () => _open3DView(functionName, dims),
+                icon: const Icon(Icons.threed_rotation),
+                label: const Text('3D-визуализация'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.deepPurple,
+                ),
+              ),
             ],
             if (population != null) ...[
               const SizedBox(height: 16),
@@ -289,6 +301,25 @@ class _ResultsScreenState extends State<ResultsScreen> {
             ),
             const SizedBox(height: 16),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _open3DView(String functionName, int dims) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => Surface3DScreen(
+          functionName: functionName,
+          xMin: widget.config.problem.bounds.low,
+          xMax: widget.config.problem.bounds.high,
+          yMin: widget.config.problem.bounds.low,
+          yMax: widget.config.problem.bounds.high,
+          historyBestX: widget.historyBestX,
+          bestPoint: widget.result.result.bestX,
+          dimX: _projX,
+          dimY: _projY,
+          dims: dims,
         ),
       ),
     );

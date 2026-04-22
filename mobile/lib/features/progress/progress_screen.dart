@@ -171,7 +171,9 @@ class ProgressScreen extends StatelessWidget {
   Future<void> _saveAndNavigate(
       BuildContext context, ProgressState state) async {
     final result = state.result!;
-    final config = context.read<ProgressCubit>().config;
+    final cubit = context.read<ProgressCubit>();
+    final config = cubit.config;
+    final historyBestX = List<List<double>>.from(state.historyBestX);
 
     final saved = SavedJobResult(
       jobId: result.jobId,
@@ -199,6 +201,7 @@ class ProgressScreen extends StatelessWidget {
               result: result,
               config: config,
               capabilities: capabilities,
+              historyBestX: historyBestX,
             ),
           ),
         ),
