@@ -102,3 +102,17 @@ server/coverage/
 # =========================
 tmp/
 temp/
+
+
+# ========================
+# Latex
+# ========================
+*.aux
+*.bcf
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.run.xml
