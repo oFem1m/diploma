@@ -116,3 +116,5 @@ temp/
 *.synctex.gz
 *.toc
 *.run.xml
+*.bbl
+*.blg
