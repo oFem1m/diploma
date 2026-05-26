@@ -84,6 +84,13 @@
 \captionsetup[table]{labelsep=emdash, position=top, name=Таблица,
   justification=raggedright, singlelinecheck=false}
 
+%%% Перечисление частей составного рисунка в подписи:
+%%% заголовок остаётся по центру, пункты выравниваются по левому краю
+%%% с абзацным отступом 1,25 см, как в основном тексте
+\newcommand{\figitems}[1]{\protect\\[2pt]\protect\makebox[\linewidth][l]{%
+  \protect\begin{minipage}{\linewidth}\protect\raggedright
+  #1\protect\end{minipage}}}
+
 %%% Листинги кода (для приложений) — на пакете listings %%%
 \usepackage{listings}
 \usepackage{xcolor}
@@ -1204,7 +1211,7 @@ case WsJobProgress(:final data):
   \label{fig:screen-connection}
 \end{figure}
 
-\subsubsection{Настройка эксперимента}
+\subsubsection{Настройка численного эксперимента}
 
 После подключения открывается основной экран настройки. Он разбит на смысловые
 блоки: выбор целевой функции, постановка задачи, метод оптимизации, режим
@@ -1220,13 +1227,16 @@ case WsJobProgress(:final data):
 \begin{figure}[H]
   \centering
   \begin{minipage}{0.4\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_config1.png}
+    \includegraphics[width=\linewidth]{screens/screen_config1.png}\\[4pt]
+    а)
   \end{minipage}\hfill
   \begin{minipage}{0.4\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_config2.png}
+    \includegraphics[width=\linewidth]{screens/screen_config2.png}\\[4pt]
+    б)
   \end{minipage}
-  \caption{Экран настройки эксперимента: выбор функции и задачи (слева), параметры
-  метода и потоковой передачи (справа)}
+  \caption{Экран настройки эксперимента:\figitems{%
+  \hspace*{1.25cm}а) -- выбор функции и задачи;\protect\\
+  \hspace*{1.25cm}б) -- параметры метода и потоковой передачи}}
   \label{fig:screen-config}
 \end{figure}
 
@@ -1260,16 +1270,21 @@ case WsJobProgress(:final data):
 \begin{figure}[H]
   \centering
   \begin{minipage}{0.3\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_results1.png}
+    \includegraphics[width=\linewidth]{screens/screen_results1.png}\\[4pt]
+    а)
   \end{minipage}\hfill
   \begin{minipage}{0.3\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_results2.png}
+    \includegraphics[width=\linewidth]{screens/screen_results2.png}\\[4pt]
+    б)
   \end{minipage}\hfill
   \begin{minipage}{0.3\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_results3.png}
+    \includegraphics[width=\linewidth]{screens/screen_results3.png}\\[4pt]
+    в)
   \end{minipage}
-  \caption{Экран результата: лучшее решение (слева), показатели и график сходимости (в центре), контурная
-  карта пространства поиска (справа)}
+  \caption{Экран результата:\figitems{%
+  \hspace*{1.25cm}а) -- лучшее решение;\protect\\
+  \hspace*{1.25cm}б) -- показатели и график сходимости;\protect\\
+  \hspace*{1.25cm}в) -- контурная карта пространства поиска}}
   \label{fig:screen-results}
 \end{figure}
 
@@ -1313,12 +1328,16 @@ case WsJobProgress(:final data):
 \begin{figure}[H]
   \centering
   \begin{minipage}{0.4\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_history.png}
+    \includegraphics[width=\linewidth]{screens/screen_history.png}\\[4pt]
+    а)
   \end{minipage}\hfill
   \begin{minipage}{0.4\linewidth}\centering
-    \includegraphics[width=\linewidth]{screens/screen_comparison.png}
+    \includegraphics[width=\linewidth]{screens/screen_comparison.png}\\[4pt]
+    б)
   \end{minipage}
-  \caption{Экран истории экспериментов (слева) и экран сравнения запусков (справа)}
+  \caption{Экраны истории и сравнения запусков:\figitems{%
+  \hspace*{1.25cm}а) -- экран истории экспериментов;\protect\\
+  \hspace*{1.25cm}б) -- экран сравнения запусков}}
   \label{fig:screen-history}
 \end{figure}
 
