@@ -49,7 +49,6 @@ class WsClient {
       _cancelReconnectTimers();
       _reconnectAttempts = 0;
       _eventController.add(WsConnected());
-      _startPing();
 
       _channel!.stream.listen(
         (data) => _onMessage(data as String),
@@ -91,6 +90,7 @@ class WsClient {
       case MessageTypes.hello:
         _eventController.add(WsHelloReceived(ServerHello.fromPayload(payload)));
         _flushPending();
+        _startPing();
       case MessageTypes.ping:
         _sendRaw(buildEnvelope(type: MessageTypes.pong, payload: {}));
       case MessageTypes.jobAccepted:

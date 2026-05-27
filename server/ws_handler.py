@@ -36,7 +36,8 @@ class ConnectionHandler:
         logger.info("client connected")
 
         try:
-            await self._wait_hello()
+            if not await self._wait_hello():
+                return
             self._ping_task = asyncio.ensure_future(self._ping_loop())
             await self._message_loop()
         except WebSocketDisconnect:
@@ -63,7 +64,8 @@ class ConnectionHandler:
                 "first message must be hello",
                 reply_to=envelope.header.msg_id,
             )
-            return
+            await self.ws.close()
+            return False
 
         capabilities = {
             "methods": list(SUPPORTED_METHODS),
@@ -76,6 +78,7 @@ class ConnectionHandler:
             "server": {"name": "optimizer-server", "version": "0.1.0"},
             "capabilities": capabilities,
         }, reply_to=envelope.header.msg_id)
+        return True
 
     async def _message_loop(self):
         while True:
@@ -295,8 +298,11 @@ class ConnectionHandler:
     async def _send(self, msg_type: str, payload: dict, *,
                     reply_to: str = None, trace: dict = None):
         msg = build_envelope(msg_type, payload, reply_to=reply_to, trace=trace)
-        async with self._send_lock:
-            await self.ws.send_text(json.dumps(msg, default=str))
+        try:
+            async with self._send_lock:
+                await self.ws.send_text(json.dumps(msg, default=str))
+        except RuntimeError:
+            raise WebSocketDisconnect()
 
     async def _send_error(self, code: str, message: str, *,
                           reply_to: str = None, retryable: bool = False):
