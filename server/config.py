@@ -21,4 +21,5 @@ class ServerConfig:
     max_workers: int = 2
     default_timeout_ms: int = 600_000  # 10 min
     ping_interval_s: int = 30
+    reconnect_grace_s: int = 120
     limits: Limits = field(default_factory=Limits)

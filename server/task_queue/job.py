@@ -33,6 +33,8 @@ class Job:
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
         self.ws = None
+        self.last_progress: Optional[Dict[str, Any]] = None
+        self.disconnect_task: Optional[asyncio.Task] = None
 
     def mark_started(self):
         self.state = JobState.RUNNING

@@ -10,6 +10,7 @@ class WsClient {
   WebSocketChannel? _channel;
   final _eventController = StreamController<WsEvent>.broadcast();
   Timer? _pingTimer;
+  Timer? _pongTimeoutTimer;
   Timer? _reconnectTimer;
   Timer? _reconnectCountdownTimer;
   String? _host;
@@ -21,6 +22,8 @@ class WsClient {
   int _reconnectRemainingSeconds = 0;
   final List<Map<String, dynamic>> _pendingEnvelopes = [];
   static const _maxReconnectDelay = 30;
+  static const _pingIntervalSeconds = 5;
+  static const _pongTimeoutSeconds = 10;
 
   Stream<WsEvent> get events => _eventController.stream;
   bool get isConnected => _channel != null;
@@ -79,6 +82,7 @@ class WsClient {
   }
 
   void _onMessage(String raw) {
+    _pongTimeoutTimer?.cancel();
     final envelope = parseEnvelope(raw);
     final type = getType(envelope);
     final payload = getPayload(envelope);
@@ -87,6 +91,8 @@ class WsClient {
       case MessageTypes.hello:
         _eventController.add(WsHelloReceived(ServerHello.fromPayload(payload)));
         _flushPending();
+      case MessageTypes.ping:
+        _sendRaw(buildEnvelope(type: MessageTypes.pong, payload: {}));
       case MessageTypes.jobAccepted:
         _eventController.add(WsJobAccepted(JobAccepted.fromPayload(payload)));
       case MessageTypes.jobQueued:
@@ -99,6 +105,8 @@ class WsClient {
         _eventController.add(WsJobResult(JobResult.fromPayload(payload)));
       case MessageTypes.jobFinished:
         _eventController.add(WsJobFinished(JobFinished.fromPayload(payload)));
+      case MessageTypes.jobStatus:
+        _eventController.add(WsJobStatus(JobStatus.fromPayload(payload)));
       case MessageTypes.error:
         _eventController.add(WsError(ProtocolError.fromPayload(payload)));
       case MessageTypes.pong:
@@ -107,8 +115,10 @@ class WsClient {
   }
 
   void _onDone() {
+    if (_channel == null) return;
     _channel = null;
     _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
     if (!_intentionalClose) {
       _eventController.add(WsDisconnected(reason: 'Connection lost'));
       _scheduleReconnect();
@@ -160,11 +170,32 @@ class WsClient {
 
   void _startPing() {
     _pingTimer?.cancel();
-    _pingTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _pongTimeoutTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: _pingIntervalSeconds), (
+      _,
+    ) {
       if (_channel != null) {
         send(buildEnvelope(type: MessageTypes.ping, payload: {}));
+        _startPongTimeout();
       }
     });
+  }
+
+  void _startPongTimeout() {
+    _pongTimeoutTimer?.cancel();
+    _pongTimeoutTimer = Timer(const Duration(seconds: _pongTimeoutSeconds), () {
+      _handleConnectionLost('Ping timeout');
+    });
+  }
+
+  void _handleConnectionLost(String reason) {
+    if (_channel == null || _intentionalClose) return;
+    _channel?.sink.close();
+    _channel = null;
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _eventController.add(WsDisconnected(reason: reason));
+    _scheduleReconnect();
   }
 
   void send(Map<String, dynamic> envelope) {
@@ -172,7 +203,15 @@ class WsClient {
       _pendingEnvelopes.add(envelope);
       return;
     }
-    _channel!.sink.add(jsonEncode(envelope));
+    _sendRaw(envelope);
+  }
+
+  void _sendRaw(Map<String, dynamic> envelope) {
+    try {
+      _channel?.sink.add(jsonEncode(envelope));
+    } catch (_) {
+      _handleConnectionLost('Connection lost');
+    }
   }
 
   void _flushPending() {
@@ -240,6 +279,7 @@ class WsClient {
   Future<void> disconnect() async {
     _intentionalClose = true;
     _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
     _cancelReconnectTimers();
     _pendingEnvelopes.clear();
     await _channel?.sink.close();
@@ -249,6 +289,7 @@ class WsClient {
   void dispose() {
     _intentionalClose = true;
     _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
     _cancelReconnectTimers();
     _pendingEnvelopes.clear();
     _channel?.sink.close();

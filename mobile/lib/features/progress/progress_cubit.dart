@@ -146,6 +146,10 @@ class ProgressCubit extends Cubit<ProgressState> {
         emit(state.copyWith(isReconnecting: false));
       case WsHelloReceived():
         emit(state.copyWith(isReconnecting: false));
+        final jobId = state.jobId;
+        if (jobId != null && !_isTerminal(state.phase)) {
+          _ws.requestStatus(jobId, _clientReqId);
+        }
       case WsReconnectScheduled(
         :final attempt,
         :final delaySeconds,
@@ -191,33 +195,7 @@ class ProgressCubit extends Cubit<ProgressState> {
       case WsJobStarted(:final data):
         emit(state.copyWith(jobId: data.jobId, phase: JobPhase.started));
       case WsJobProgress(:final data):
-        final newHistory = List<double>.from(state.historyBestF);
-        if (data.progress.historyBestFTail != null) {
-          for (final v in data.progress.historyBestFTail!) {
-            if (newHistory.isEmpty || newHistory.last != v) {
-              newHistory.add(v);
-            }
-          }
-        } else {
-          newHistory.add(data.progress.bestF);
-        }
-        // Accumulate best X positions for 3D path visualization
-        final newHistoryX = List<List<double>>.from(state.historyBestX);
-        if (data.progress.bestX != null) {
-          newHistoryX.add(List<double>.from(data.progress.bestX!));
-        }
-        emit(
-          state.copyWith(
-            phase: JobPhase.running,
-            iteration: data.progress.iteration,
-            maxIterations: data.progress.maxIterations,
-            bestF: data.progress.bestF,
-            bestX: data.progress.bestX,
-            historyBestF: newHistory,
-            historyBestX: newHistoryX,
-            elapsedMs: data.progress.elapsedMs,
-          ),
-        );
+        _emitProgress(data.progress);
       case WsJobResult(:final data):
         emit(
           state.copyWith(
@@ -228,14 +206,22 @@ class ProgressCubit extends Cubit<ProgressState> {
           ),
         );
       case WsJobFinished(:final data):
-        final phase = switch (data.finalState) {
-          'succeeded' => JobPhase.succeeded,
-          'failed' => JobPhase.failed,
-          'cancelled' => JobPhase.cancelled,
-          'timeout' => JobPhase.timeout,
-          _ => JobPhase.failed,
-        };
+        final phase = _phaseFromServerState(data.finalState);
         emit(state.copyWith(phase: phase));
+      case WsJobStatus(:final data):
+        final phase = _phaseFromServerState(data.state);
+        if (data.progress != null) {
+          _emitProgress(data.progress!, phase: phase);
+        } else {
+          emit(
+            state.copyWith(
+              jobId: data.jobId,
+              phase: phase,
+              queuePosition: data.queue?.position,
+              queueEtaMs: data.queue?.etaMs,
+            ),
+          );
+        }
       case WsError(:final error):
         emit(
           state.copyWith(phase: JobPhase.failed, errorMessage: error.message),
@@ -243,6 +229,58 @@ class ProgressCubit extends Cubit<ProgressState> {
       default:
         break;
     }
+  }
+
+  void _emitProgress(
+    ProgressData progress, {
+    JobPhase phase = JobPhase.running,
+  }) {
+    final newHistory = List<double>.from(state.historyBestF);
+    if (progress.historyBestFTail != null) {
+      for (final v in progress.historyBestFTail!) {
+        if (newHistory.isEmpty || newHistory.last != v) {
+          newHistory.add(v);
+        }
+      }
+    } else if (newHistory.isEmpty || newHistory.last != progress.bestF) {
+      newHistory.add(progress.bestF);
+    }
+    final newHistoryX = List<List<double>>.from(state.historyBestX);
+    if (progress.bestX != null) {
+      newHistoryX.add(List<double>.from(progress.bestX!));
+    }
+    emit(
+      state.copyWith(
+        phase: phase,
+        iteration: progress.iteration,
+        maxIterations: progress.maxIterations,
+        bestF: progress.bestF,
+        bestX: progress.bestX,
+        historyBestF: newHistory,
+        historyBestX: newHistoryX,
+        elapsedMs: progress.elapsedMs,
+      ),
+    );
+  }
+
+  JobPhase _phaseFromServerState(String value) {
+    return switch (value) {
+      'queued' => JobPhase.queued,
+      'started' => JobPhase.started,
+      'running' => JobPhase.running,
+      'succeeded' => JobPhase.succeeded,
+      'failed' => JobPhase.failed,
+      'cancelled' => JobPhase.cancelled,
+      'timeout' => JobPhase.timeout,
+      _ => JobPhase.failed,
+    };
+  }
+
+  bool _isTerminal(JobPhase phase) {
+    return phase == JobPhase.succeeded ||
+        phase == JobPhase.failed ||
+        phase == JobPhase.cancelled ||
+        phase == JobPhase.timeout;
   }
 
   void cancelJob() {

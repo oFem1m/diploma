@@ -26,7 +26,7 @@ class ConnectionHandler:
         self.ws = ws
         self.job_queue = job_queue
         self.config = config
-        self._active_jobs: list[str] = []
+        self._active_jobs: set[str] = set()
         self._ping_task = None
 
     async def handle(self):
@@ -45,7 +45,11 @@ class ConnectionHandler:
             if self._ping_task:
                 self._ping_task.cancel()
             for job_id in self._active_jobs:
-                self.job_queue.cancel(job_id)
+                self.job_queue.detach_ws_later(
+                    job_id,
+                    self.ws,
+                    self.config.reconnect_grace_s,
+                )
 
     async def _wait_hello(self):
         raw = await self.ws.receive_text()
@@ -86,6 +90,7 @@ class ConnectionHandler:
                 "cancel": self._handle_cancel,
                 "job.status.get": self._handle_status_get,
                 "ping": self._handle_ping,
+                "pong": self._handle_pong,
             }
 
             handler = handlers.get(msg_type)
@@ -137,7 +142,7 @@ class ConnectionHandler:
             )
             return
 
-        self._active_jobs.append(job.job_id)
+        self._active_jobs.add(job.job_id)
 
         position, eta_ms = self.job_queue.get_queue_position(job.job_id)
         trace = {
@@ -197,11 +202,21 @@ class ConnectionHandler:
                                    reply_to=envelope.header.msg_id)
             return
 
+        client_req_id = envelope.header.trace.client_req_id
+        if client_req_id and client_req_id != job.client_req_id:
+            await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        if not job.is_terminal:
+            self.job_queue.attach_ws(job.job_id, self.ws)
+            self._active_jobs.add(job.job_id)
+
         status_payload = {
             "job_id": job.job_id,
             "state": job.state.value,
             "queue": None,
-            "progress": None,
+            "progress": job.last_progress,
         }
 
         if job.state.value == "queued":
@@ -215,9 +230,42 @@ class ConnectionHandler:
         }
         await self._send("job.status", status_payload,
                          reply_to=envelope.header.msg_id, trace=trace)
+        if job.is_terminal:
+            await self._send_terminal_snapshot(job, reply_to=envelope.header.msg_id, trace=trace)
 
     async def _handle_ping(self, envelope):
         await self._send("pong", {}, reply_to=envelope.header.msg_id)
+
+    async def _handle_pong(self, envelope):
+        return
+
+    async def _send_terminal_snapshot(self, job, *, reply_to: str = None, trace: dict = None):
+        if job.state.value == "succeeded" and job.result:
+            history = job.result.get("history_best_f", [])
+            await self._send("job.result", {
+                "job_id": job.job_id,
+                "result": {
+                    "best_x": job.result["best_x"],
+                    "best_f": job.result["best_f"],
+                    "history_best_f": history,
+                    "final_population": job.result.get("final_population"),
+                    "final_fitness": job.result.get("final_fitness"),
+                    "final_positions": job.result.get("final_positions"),
+                    "final_velocities": job.result.get("final_velocities"),
+                },
+                "metrics": {
+                    "method": job.result.get("method", "unknown"),
+                    "iterations": len(history),
+                    "evals": len(history),
+                    "wall_time_ms": job.result.get("wall_time_ms", 0),
+                    "seed": job.result.get("seed"),
+                },
+            }, reply_to=reply_to, trace=trace)
+        await self._send("job.finished", {
+            "job_id": job.job_id,
+            "final_state": job.state.value,
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        }, reply_to=reply_to, trace=trace)
 
     async def _ping_loop(self):
         try:

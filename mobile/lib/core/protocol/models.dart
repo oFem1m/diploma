@@ -127,11 +127,15 @@ class ProgressData {
       bestF: (json['best_f'] as num).toDouble(),
       bestX: json['best_x'] != null
           ? List<double>.from(
-              (json['best_x'] as List).map((e) => (e as num).toDouble()))
+              (json['best_x'] as List).map((e) => (e as num).toDouble()),
+            )
           : null,
       historyBestFTail: json['history_best_f_tail'] != null
-          ? List<double>.from((json['history_best_f_tail'] as List)
-              .map((e) => (e as num).toDouble()))
+          ? List<double>.from(
+              (json['history_best_f_tail'] as List).map(
+                (e) => (e as num).toDouble(),
+              ),
+            )
           : null,
       elapsedMs: json['elapsed_ms'] as int,
     );
@@ -147,8 +151,9 @@ class JobProgress {
   factory JobProgress.fromPayload(Map<String, dynamic> payload) {
     return JobProgress(
       jobId: payload['job_id'] as String,
-      progress:
-          ProgressData.fromJson(payload['progress'] as Map<String, dynamic>),
+      progress: ProgressData.fromJson(
+        payload['progress'] as Map<String, dynamic>,
+      ),
     );
   }
 }
@@ -179,12 +184,12 @@ class ResultMetrics {
   }
 
   Map<String, dynamic> toJson() => {
-        'method': method,
-        'iterations': iterations,
-        'evals': evals,
-        'wall_time_ms': wallTimeMs,
-        'seed': seed,
-      };
+    'method': method,
+    'iterations': iterations,
+    'evals': evals,
+    'wall_time_ms': wallTimeMs,
+    'seed': seed,
+  };
 }
 
 class JobResultData {
@@ -209,14 +214,17 @@ class JobResultData {
   factory JobResultData.fromJson(Map<String, dynamic> json) {
     return JobResultData(
       bestX: List<double>.from(
-          (json['best_x'] as List).map((e) => (e as num).toDouble())),
+        (json['best_x'] as List).map((e) => (e as num).toDouble()),
+      ),
       bestF: (json['best_f'] as num).toDouble(),
       historyBestF: List<double>.from(
-          (json['history_best_f'] as List).map((e) => (e as num).toDouble())),
+        (json['history_best_f'] as List).map((e) => (e as num).toDouble()),
+      ),
       finalPopulation: _parseMatrix(json['final_population']),
       finalFitness: json['final_fitness'] != null
-          ? List<double>.from((json['final_fitness'] as List)
-              .map((e) => (e as num).toDouble()))
+          ? List<double>.from(
+              (json['final_fitness'] as List).map((e) => (e as num).toDouble()),
+            )
           : null,
       finalPositions: _parseMatrix(json['final_positions']),
       finalVelocities: _parseMatrix(json['final_velocities']),
@@ -224,20 +232,23 @@ class JobResultData {
   }
 
   Map<String, dynamic> toJson() => {
-        'best_x': bestX,
-        'best_f': bestF,
-        'history_best_f': historyBestF,
-        if (finalPopulation != null) 'final_population': finalPopulation,
-        if (finalFitness != null) 'final_fitness': finalFitness,
-        if (finalPositions != null) 'final_positions': finalPositions,
-        if (finalVelocities != null) 'final_velocities': finalVelocities,
-      };
+    'best_x': bestX,
+    'best_f': bestF,
+    'history_best_f': historyBestF,
+    if (finalPopulation != null) 'final_population': finalPopulation,
+    if (finalFitness != null) 'final_fitness': finalFitness,
+    if (finalPositions != null) 'final_positions': finalPositions,
+    if (finalVelocities != null) 'final_velocities': finalVelocities,
+  };
 
   static List<List<double>>? _parseMatrix(dynamic data) {
     if (data == null) return null;
     return (data as List)
-        .map((row) => List<double>.from(
-            (row as List).map((e) => (e as num).toDouble())))
+        .map(
+          (row) => List<double>.from(
+            (row as List).map((e) => (e as num).toDouble()),
+          ),
+        )
         .toList();
   }
 }
@@ -247,19 +258,15 @@ class JobResult {
   final JobResultData result;
   final ResultMetrics metrics;
 
-  JobResult({
-    required this.jobId,
-    required this.result,
-    required this.metrics,
-  });
+  JobResult({required this.jobId, required this.result, required this.metrics});
 
   factory JobResult.fromPayload(Map<String, dynamic> payload) {
     return JobResult(
       jobId: payload['job_id'] as String,
-      result:
-          JobResultData.fromJson(payload['result'] as Map<String, dynamic>),
-      metrics:
-          ResultMetrics.fromJson(payload['metrics'] as Map<String, dynamic>),
+      result: JobResultData.fromJson(payload['result'] as Map<String, dynamic>),
+      metrics: ResultMetrics.fromJson(
+        payload['metrics'] as Map<String, dynamic>,
+      ),
     );
   }
 }
@@ -280,6 +287,33 @@ class JobFinished {
       jobId: payload['job_id'] as String,
       finalState: payload['final_state'] as String,
       finishedAt: payload['finished_at'] as String,
+    );
+  }
+}
+
+class JobStatus {
+  final String jobId;
+  final String state;
+  final QueueInfo? queue;
+  final ProgressData? progress;
+
+  JobStatus({
+    required this.jobId,
+    required this.state,
+    this.queue,
+    this.progress,
+  });
+
+  factory JobStatus.fromPayload(Map<String, dynamic> payload) {
+    return JobStatus(
+      jobId: payload['job_id'] as String,
+      state: payload['state'] as String,
+      queue: payload['queue'] != null
+          ? QueueInfo.fromJson(payload['queue'] as Map<String, dynamic>)
+          : null,
+      progress: payload['progress'] != null
+          ? ProgressData.fromJson(payload['progress'] as Map<String, dynamic>)
+          : null,
     );
   }
 }

@@ -68,6 +68,11 @@ class WsJobFinished extends WsEvent {
   WsJobFinished(this.data);
 }
 
+class WsJobStatus extends WsEvent {
+  final JobStatus data;
+  WsJobStatus(this.data);
+}
+
 class WsError extends WsEvent {
   final ProtocolError error;
   WsError(this.error);

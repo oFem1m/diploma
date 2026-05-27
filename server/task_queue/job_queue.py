@@ -29,7 +29,9 @@ class JobQueue:
         if client_req_id in self._idempotency:
             existing_job_id = self._idempotency[client_req_id]
             if existing_job_id in self._registry:
-                return self._registry[existing_job_id], False
+                job = self._registry[existing_job_id]
+                self.attach_ws(job.job_id, ws)
+                return job, False
 
         priority_int = PRIORITY_MAP.get(priority, 1)
         job = Job(client_req_id=client_req_id, payload=payload, priority=priority_int)
@@ -44,6 +46,38 @@ class JobQueue:
         self._idempotency[client_req_id] = job.job_id
 
         return job, True
+
+    def attach_ws(self, job_id: str, ws) -> bool:
+        job = self._registry.get(job_id)
+        if not job or job.is_terminal:
+            return False
+        if job.disconnect_task:
+            job.disconnect_task.cancel()
+            job.disconnect_task = None
+        job.ws = ws
+        return True
+
+    def detach_ws_later(self, job_id: str, ws, delay_s: int) -> bool:
+        job = self._registry.get(job_id)
+        if not job or job.is_terminal or job.ws is not ws:
+            return False
+        if job.disconnect_task:
+            job.disconnect_task.cancel()
+        job.disconnect_task = asyncio.create_task(self._cancel_if_still_detached(job, ws, delay_s))
+        return True
+
+    async def _cancel_if_still_detached(self, job: Job, ws, delay_s: int):
+        task = asyncio.current_task()
+        try:
+            await asyncio.sleep(delay_s)
+            if not job.is_terminal and job.ws is ws:
+                job.ws = None
+                self.cancel(job.job_id)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if job.disconnect_task is task:
+                job.disconnect_task = None
 
     async def get_next(self) -> Job:
         while True:

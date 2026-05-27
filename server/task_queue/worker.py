@@ -180,6 +180,7 @@ class Worker:
             if data.get("history_best_f_tail"):
                 progress_payload["progress"]["history_best_f_tail"] = data["history_best_f_tail"]
 
+            job.last_progress = progress_payload["progress"]
             await self._send(job, "job.progress", progress_payload)
 
     async def _send_finished(self, job: Job, final_state: str):
