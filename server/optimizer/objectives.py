@@ -4,6 +4,7 @@ import ast
 import math
 import sys
 import os
+import re
 from typing import Callable
 
 import numpy as np
@@ -35,8 +36,12 @@ _SAFE_MATH = {
 }
 
 
-def _compile_expression(expr: str, dims: int) -> Callable[[np.ndarray], np.ndarray]:
-    tree = ast.parse(expr, mode="eval")
+def validate_expression(expr: str, dims: int) -> None:
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"invalid expression syntax: {exc.msg}") from exc
+
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.Call)):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -46,7 +51,20 @@ def _compile_expression(expr: str, dims: int) -> Callable[[np.ndarray], np.ndarr
                 raise ValueError(f"unsafe call in expression: {ast.dump(node)}")
         if isinstance(node, ast.Attribute):
             raise ValueError(f"attribute access not allowed: {ast.dump(node)}")
+        if isinstance(node, ast.Name):
+            if node.id in _SAFE_MATH:
+                continue
+            match = re.fullmatch(r"x(\d+)", node.id)
+            if match is None:
+                raise ValueError(f"unknown name in expression: {node.id}")
+            index = int(match.group(1))
+            if index >= dims:
+                raise ValueError(f"expression uses x{index}, but dims={dims}")
 
+
+def _compile_expression(expr: str, dims: int) -> Callable[[np.ndarray], np.ndarray]:
+    validate_expression(expr, dims)
+    tree = ast.parse(expr, mode="eval")
     code = compile(tree, "<expression>", "eval")
     var_names = [f"x{i}" for i in range(dims)]
 

@@ -31,21 +31,19 @@ class SavedJobResult {
   });
 
   Map<String, dynamic> toDbMap() => {
-        if (id != null) 'id': id,
-        'job_id': jobId,
-        'method': method,
-        'objective_name': objectiveName,
-        'objective_kind': objectiveKind,
-        'dims': dims,
-        'best_f': bestF,
-        'status': status,
-        'result_json':
-            resultData != null ? jsonEncode(resultData!.toJson()) : null,
-        'metrics_json':
-            metrics != null ? jsonEncode(metrics!.toJson()) : null,
-        'config_json': config != null ? jsonEncode(config) : null,
-        'created_at': createdAt.toIso8601String(),
-      };
+    if (id != null) 'id': id,
+    'job_id': jobId,
+    'method': method,
+    'objective_name': objectiveName,
+    'objective_kind': objectiveKind,
+    'dims': dims,
+    'best_f': bestF,
+    'status': status,
+    'result_json': resultData != null ? jsonEncode(resultData!.toJson()) : null,
+    'metrics_json': metrics != null ? jsonEncode(metrics!.toJson()) : null,
+    'config_json': config != null ? jsonEncode(config) : null,
+    'created_at': createdAt.toIso8601String(),
+  };
 
   factory SavedJobResult.fromDbMap(Map<String, dynamic> map) {
     return SavedJobResult(
@@ -59,18 +57,36 @@ class SavedJobResult {
       status: map['status'] as String,
       resultData: map['result_json'] != null
           ? JobResultData.fromJson(
-              jsonDecode(map['result_json'] as String)
-                  as Map<String, dynamic>)
+              jsonDecode(map['result_json'] as String) as Map<String, dynamic>,
+            )
           : null,
       metrics: map['metrics_json'] != null
           ? ResultMetrics.fromJson(
-              jsonDecode(map['metrics_json'] as String)
-                  as Map<String, dynamic>)
+              jsonDecode(map['metrics_json'] as String) as Map<String, dynamic>,
+            )
           : null,
       config: map['config_json'] != null
           ? jsonDecode(map['config_json'] as String) as Map<String, dynamic>
           : null,
       createdAt: DateTime.parse(map['created_at'] as String),
     );
+  }
+
+  String get displayObjectiveName {
+    if (objectiveKind == 'expression') {
+      return 'Пользовательская функция';
+    }
+    return objectiveName;
+  }
+
+  String? get expression {
+    final objective = config?['objective'];
+    if (objective is Map<String, dynamic>) {
+      return objective['expr'] as String?;
+    }
+    if (objective is Map) {
+      return objective['expr'] as String?;
+    }
+    return null;
   }
 }

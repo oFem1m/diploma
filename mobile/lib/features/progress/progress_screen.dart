@@ -210,7 +210,9 @@ class ProgressScreen extends StatelessWidget {
     final saved = SavedJobResult(
       jobId: result.jobId,
       method: result.metrics.method,
-      objectiveName: config.objective.name ?? config.objective.expr ?? '',
+      objectiveName: config.objective.kind == 'expression'
+          ? 'Пользовательская функция'
+          : config.objective.name ?? '',
       objectiveKind: config.objective.kind,
       dims: config.problem.dims,
       bestF: result.result.bestF,

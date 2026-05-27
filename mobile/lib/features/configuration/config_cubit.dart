@@ -68,6 +68,10 @@ class ConfigCubit extends Cubit<ConfigState> {
 
   void setExpression(String expr) {
     state.config.objective.expr = expr;
+    final requiredDims = _requiredDimsFromExpression(expr);
+    if (requiredDims != null && requiredDims > state.config.problem.dims) {
+      _setDimsValue(requiredDims);
+    }
     _emitUpdated();
   }
 
@@ -77,6 +81,11 @@ class ConfigCubit extends Cubit<ConfigState> {
   }
 
   void setDims(int dims) {
+    _setDimsValue(dims);
+    _emitUpdated();
+  }
+
+  void _setDimsValue(int dims) {
     state.config.problem.dims = dims;
     final b = state.config.problem.bounds;
     if (b.kind == 'per_dim') {
@@ -86,7 +95,6 @@ class ConfigCubit extends Cubit<ConfigState> {
         (i) => i < old.length ? old[i] : [b.low, b.high],
       );
     }
-    _emitUpdated();
   }
 
   void setBoundsKind(String kind) {
@@ -211,6 +219,12 @@ class ConfigCubit extends Cubit<ConfigState> {
         (c.objective.expr == null || c.objective.expr!.isEmpty)) {
       return 'Необходимо ввести выражение';
     }
+    if (c.objective.kind == 'expression' && c.objective.expr != null) {
+      final requiredDims = _requiredDimsFromExpression(c.objective.expr!);
+      if (requiredDims != null && requiredDims > c.problem.dims) {
+        return 'Выражение использует x${requiredDims - 1}, поэтому размерность должна быть не меньше $requiredDims';
+      }
+    }
     if (c.problem.dims < 1 || c.problem.dims > 100) {
       return 'Размерность должна быть от 1 до 100';
     }
@@ -240,5 +254,17 @@ class ConfigCubit extends Cubit<ConfigState> {
 
   void _emitUpdated() {
     emit(ConfigState(config: state.config, version: state.version + 1));
+  }
+
+  int? _requiredDimsFromExpression(String expr) {
+    final matches = RegExp(r'\bx(\d+)\b').allMatches(expr);
+    int? maxIndex;
+    for (final match in matches) {
+      final index = int.tryParse(match.group(1)!);
+      if (index != null && (maxIndex == null || index > maxIndex)) {
+        maxIndex = index;
+      }
+    }
+    return maxIndex == null ? null : maxIndex + 1;
   }
 }

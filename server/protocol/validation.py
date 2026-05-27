@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from config import Limits
+from optimizer.objectives import validate_expression
 from protocol.types import JobSubmitPayload
 
 SUPPORTED_METHODS = {
@@ -82,5 +83,10 @@ def validate_job_submit(payload: JobSubmitPayload, limits: Limits) -> Optional[L
     elif obj.kind.value == "expression":
         if not obj.expr:
             errors.append("expression objective requires 'expr' field")
+        else:
+            try:
+                validate_expression(obj.expr, payload.problem.dims)
+            except ValueError as exc:
+                errors.append(str(exc))
 
     return errors if errors else None

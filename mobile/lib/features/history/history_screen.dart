@@ -202,7 +202,7 @@ class _HistoryBody extends StatelessWidget {
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                         subtitle: Text(
-                          '${r.objectiveName} | ${r.dims}D | '
+                          '${r.displayObjectiveName} | ${r.dims}D | '
                           'f=${formatBestF(r.bestF, maxPlainLength: 12)}\n'
                           '${DateFormat.yMd().add_Hms().format(r.createdAt)}',
                         ),
@@ -265,7 +265,11 @@ class _HistoryBody extends StatelessWidget {
 
     final config = JobConfig(
       methodName: r.method,
-      objective: ObjectiveConfig(kind: r.objectiveKind, name: r.objectiveName),
+      objective: ObjectiveConfig(
+        kind: r.objectiveKind,
+        name: r.objectiveKind == 'builtin' ? r.objectiveName : null,
+        expr: r.expression,
+      ),
       problem: ProblemConfig(dims: r.dims),
     );
 
