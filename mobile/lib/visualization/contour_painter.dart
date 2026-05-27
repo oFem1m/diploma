@@ -14,6 +14,7 @@ class ContourPainter extends CustomPainter {
   final int resolution;
   final int dimX;
   final int dimY;
+  final int dims;
 
   ContourPainter({
     required this.function,
@@ -26,6 +27,7 @@ class ContourPainter extends CustomPainter {
     this.resolution = 80,
     this.dimX = 0,
     this.dimY = 1,
+    this.dims = 2,
   });
 
   @override
@@ -42,7 +44,9 @@ class ContourPainter extends CustomPainter {
     for (int j = 0; j < resolution; j++) {
       for (int i = 0; i < resolution; i++) {
         final val = grid.values[j][i];
-        final logT = range > 0 ? (math.log(val - minVal + 1) / math.log(range + 1)).clamp(0.0, 1.0) : 0.0;
+        final logT = range > 0
+            ? (math.log(val - minVal + 1) / math.log(range + 1)).clamp(0.0, 1.0)
+            : 0.0;
         paint.color = ColorMaps.viridis(logT);
         canvas.drawRect(
           Rect.fromLTWH(i * cellW, j * cellH, cellW + 0.5, cellH + 0.5),
@@ -114,7 +118,10 @@ class ContourPainter extends CustomPainter {
   }
 
   _GridData _computeGrid() {
-    final values = List.generate(resolution, (_) => List.filled(resolution, 0.0));
+    final values = List.generate(
+      resolution,
+      (_) => List.filled(resolution, 0.0),
+    );
     double minVal = double.infinity;
     double maxVal = double.negativeInfinity;
 
@@ -122,7 +129,7 @@ class ContourPainter extends CustomPainter {
       final y = yMin + (yMax - yMin) * j / (resolution - 1);
       for (int i = 0; i < resolution; i++) {
         final x = xMin + (xMax - xMin) * i / (resolution - 1);
-        final val = function([x, y]);
+        final val = function(_makePoint(x, y));
         values[j][i] = val;
         if (val < minVal) minVal = val;
         if (val > maxVal) maxVal = val;
@@ -133,6 +140,21 @@ class ContourPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(ContourPainter oldDelegate) => true;
+
+  List<double> _makePoint(double xVal, double yVal) {
+    final point = List<double>.filled(
+      math.max(dims, math.max(dimX, dimY) + 1),
+      0.0,
+    );
+    if (bestPoint != null) {
+      for (var i = 0; i < math.min(bestPoint!.length, point.length); i++) {
+        point[i] = bestPoint![i];
+      }
+    }
+    point[dimX] = xVal;
+    point[dimY] = yVal;
+    return point;
+  }
 }
 
 class _GridData {

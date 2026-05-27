@@ -43,8 +43,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
     final r = widget.result.result;
     final m = widget.result.metrics;
     final dims = r.bestX.length;
-    final isBuiltin = widget.config.objective.kind == 'builtin';
     final functionName = widget.config.objective.name ?? '';
+    final expression = widget.config.objective.kind == 'expression'
+        ? widget.config.objective.expr
+        : null;
     final population = r.finalPopulation ?? r.finalPositions;
 
     return Scaffold(
@@ -147,7 +149,7 @@ class _ResultsScreenState extends State<ResultsScreen> {
               height: 250,
               child: ConvergenceChart(values: r.historyBestF),
             ),
-            if (isBuiltin && dims >= 2) ...[
+            if (dims >= 2) ...[
               const SizedBox(height: 16),
               Text(
                 '2D-визуализация',
@@ -194,10 +196,12 @@ class _ResultsScreenState extends State<ResultsScreen> {
               const SizedBox(height: 8),
               ContourMapWidget(
                 functionName: functionName,
-                xMin: widget.config.problem.bounds.low,
-                xMax: widget.config.problem.bounds.high,
-                yMin: widget.config.problem.bounds.low,
-                yMax: widget.config.problem.bounds.high,
+                expression: expression,
+                dims: dims,
+                xMin: _axisLow(_projX),
+                xMax: _axisHigh(_projX),
+                yMin: _axisLow(_projY),
+                yMax: _axisHigh(_projY),
                 population: population,
                 bestPoint: r.bestX,
                 dimX: _projX,
@@ -331,10 +335,13 @@ class _ResultsScreenState extends State<ResultsScreen> {
       MaterialPageRoute(
         builder: (_) => Surface3DScreen(
           functionName: functionName,
-          xMin: widget.config.problem.bounds.low,
-          xMax: widget.config.problem.bounds.high,
-          yMin: widget.config.problem.bounds.low,
-          yMax: widget.config.problem.bounds.high,
+          expression: widget.config.objective.kind == 'expression'
+              ? widget.config.objective.expr
+              : null,
+          xMin: _axisLow(_projX),
+          xMax: _axisHigh(_projX),
+          yMin: _axisLow(_projY),
+          yMax: _axisHigh(_projY),
           historyBestX: widget.historyBestX,
           bestPoint: widget.result.result.bestX,
           dimX: _projX,
@@ -356,10 +363,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
     try {
       final bytes = await GifGenerator.generate(
         functionName: functionName,
-        xMin: widget.config.problem.bounds.low,
-        xMax: widget.config.problem.bounds.high,
-        yMin: widget.config.problem.bounds.low,
-        yMax: widget.config.problem.bounds.high,
+        xMin: _axisLow(_projX),
+        xMax: _axisHigh(_projX),
+        yMin: _axisLow(_projY),
+        yMax: _axisHigh(_projY),
         bestPoint: bestX,
         population: population,
         historyBestF: historyBestF,
@@ -382,6 +389,26 @@ class _ResultsScreenState extends State<ResultsScreen> {
         ).showSnackBar(const SnackBar(content: Text('Ошибка генерации GIF')));
       }
     }
+  }
+
+  double _axisLow(int axis) {
+    final bounds = widget.config.problem.bounds;
+    if (bounds.kind == 'per_dim' &&
+        bounds.items != null &&
+        axis < bounds.items!.length) {
+      return bounds.items![axis][0];
+    }
+    return bounds.low;
+  }
+
+  double _axisHigh(int axis) {
+    final bounds = widget.config.problem.bounds;
+    if (bounds.kind == 'per_dim' &&
+        bounds.items != null &&
+        axis < bounds.items!.length) {
+      return bounds.items![axis][1];
+    }
+    return bounds.high;
   }
 }
 

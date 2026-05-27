@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import '../../visualization/contour_painter.dart';
+import '../../visualization/expression_function.dart';
 import '../../visualization/test_functions.dart';
 
 class ContourMapWidget extends StatelessWidget {
   final String functionName;
+  final String? expression;
+  final int dims;
   final double xMin;
   final double xMax;
   final double yMin;
@@ -16,6 +19,8 @@ class ContourMapWidget extends StatelessWidget {
   const ContourMapWidget({
     super.key,
     required this.functionName,
+    this.expression,
+    this.dims = 2,
     required this.xMin,
     required this.xMax,
     required this.yMin,
@@ -28,7 +33,14 @@ class ContourMapWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fn = getTestFunction(functionName);
+    final TestFunction? fn;
+    try {
+      fn = expression != null && expression!.trim().isNotEmpty
+          ? compileExpressionFunction(expression!, dims)
+          : getTestFunction(functionName);
+    } catch (_) {
+      return const Center(child: Text('Не удалось разобрать выражение'));
+    }
     if (fn == null) {
       return const Center(child: Text('Неизвестная функция'));
     }
@@ -48,6 +60,7 @@ class ContourMapWidget extends StatelessWidget {
             bestPoint: bestPoint,
             dimX: dimX,
             dimY: dimY,
+            dims: dims,
           ),
           size: Size.infinite,
         ),

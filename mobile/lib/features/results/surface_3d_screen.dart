@@ -1,17 +1,12 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import '../../visualization/expression_function.dart';
 import '../../visualization/surface_3d_painter.dart';
 import '../../visualization/test_functions.dart';
 
-/// Full-screen 3D surface visualization with gesture-based rotation.
-///
-/// Shows the test function surface with:
-/// - Red dots tracing the path of best solutions over iterations
-/// - Yellow star marking the final best solution
-/// - Pan gestures to rotate the view
-/// - Pinch to adjust resolution
 class Surface3DScreen extends StatefulWidget {
   final String functionName;
+  final String? expression;
   final double xMin, xMax, yMin, yMax;
   final List<List<double>>? historyBestX;
   final List<double>? bestPoint;
@@ -22,6 +17,7 @@ class Surface3DScreen extends StatefulWidget {
   const Surface3DScreen({
     super.key,
     required this.functionName,
+    this.expression,
     required this.xMin,
     required this.xMax,
     required this.yMin,
@@ -38,8 +34,8 @@ class Surface3DScreen extends StatefulWidget {
 }
 
 class _Surface3DScreenState extends State<Surface3DScreen> {
-  double _rotX = -0.6; // pitch
-  double _rotZ = 0.8;  // yaw
+  double _rotX = -0.6;
+  double _rotZ = 0.8;
   int _resolution = 50;
   int _projX = 0;
   int _projY = 1;
@@ -53,7 +49,17 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final fn = getTestFunction(widget.functionName);
+    final TestFunction? fn;
+    try {
+      fn = widget.expression != null && widget.expression!.trim().isNotEmpty
+          ? compileExpressionFunction(widget.expression!, widget.dims)
+          : getTestFunction(widget.functionName);
+    } catch (_) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('3D-визуализация')),
+        body: const Center(child: Text('Не удалось разобрать выражение')),
+      );
+    }
     if (fn == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('3D-визуализация')),
@@ -65,7 +71,6 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
       appBar: AppBar(
         title: const Text('3D-визуализация'),
         actions: [
-          // Resolution control
           PopupMenuButton<int>(
             icon: const Icon(Icons.grid_on),
             tooltip: 'Разрешение сетки',
@@ -87,7 +92,6 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
                 ),
             ],
           ),
-          // Reset rotation
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Сбросить поворот',
@@ -100,7 +104,6 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
       ),
       body: Column(
         children: [
-          // Projection axes selector (for dims > 2)
           if (widget.dims > 2)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -143,19 +146,21 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
               ),
             ),
 
-          // Info bar
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             child: Row(
               children: [
                 _LegendDot(color: Colors.red, label: 'Путь лучших решений'),
                 const SizedBox(width: 16),
-                _LegendDot(color: Colors.yellow, label: 'Лучшее решение', isStar: true),
+                _LegendDot(
+                  color: Colors.yellow,
+                  label: 'Лучшее решение',
+                  isStar: true,
+                ),
               ],
             ),
           ),
 
-          // 3D surface
           Expanded(
             child: Padding(
               padding: const EdgeInsets.all(8),
@@ -164,7 +169,6 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
                   setState(() {
                     _rotZ += details.delta.dx * 0.008;
                     _rotX += details.delta.dy * 0.008;
-                    // Clamp pitch to avoid flipping
                     _rotX = _rotX.clamp(-pi / 2 + 0.05, 0.05);
                   });
                 },
@@ -199,14 +203,13 @@ class _Surface3DScreenState extends State<Surface3DScreen> {
             ),
           ),
 
-          // Hint
           Padding(
             padding: const EdgeInsets.only(bottom: 16),
             child: Text(
               'Проведите пальцем для вращения',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.grey,
-                  ),
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: Colors.grey),
             ),
           ),
         ],
@@ -220,7 +223,11 @@ class _LegendDot extends StatelessWidget {
   final String label;
   final bool isStar;
 
-  const _LegendDot({required this.color, required this.label, this.isStar = false});
+  const _LegendDot({
+    required this.color,
+    required this.label,
+    this.isStar = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -233,10 +240,7 @@ class _LegendDot extends StatelessWidget {
           Container(
             width: 10,
             height: 10,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
-            ),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
           ),
         const SizedBox(width: 4),
         Text(label, style: Theme.of(context).textTheme.bodySmall),
