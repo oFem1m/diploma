@@ -52,9 +52,15 @@ TestFunction? getTestFunction(String name) {
 
 const builtinFunctions = ['sphere', 'rastrigin', 'ackley', 'bukin6'];
 
-Map<String, List<double>> defaultBounds = {
+Map<String, List<double>> defaultBoundsUniform = {
   'sphere': [-5.12, 5.12],
   'rastrigin': [-5.12, 5.12],
   'ackley': [-5.0, 5.0],
-  'bukin6': [-15.0, -5.0],
+};
+
+Map<String, List<List<double>>> defaultBoundsPerDim = {
+  'bukin6': [
+    [-15.0, -5.0],
+    [-3.0, 3.0],
+  ],
 };

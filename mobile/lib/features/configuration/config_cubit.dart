@@ -2,6 +2,7 @@ import 'package:equatable/equatable.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../core/models/job_config.dart';
 import '../../core/models/method_configs.dart';
+import '../../visualization/test_functions.dart';
 
 class ConfigState extends Equatable {
   final JobConfig config;
@@ -44,6 +45,21 @@ class ConfigCubit extends Cubit<ConfigState> {
 
   void setObjectiveName(String name) {
     state.config.objective.name = name;
+    final pd = defaultBoundsPerDim[name];
+    if (pd != null) {
+      state.config.problem.dims = pd.length;
+      state.config.problem.bounds.kind = 'per_dim';
+      state.config.problem.bounds.items =
+          pd.map((p) => [p[0], p[1]]).toList();
+    } else {
+      final b = defaultBoundsUniform[name];
+      if (b != null) {
+        state.config.problem.bounds.kind = 'uniform';
+        state.config.problem.bounds.low = b[0];
+        state.config.problem.bounds.high = b[1];
+        state.config.problem.bounds.items = null;
+      }
+    }
     _emitUpdated();
   }
 
@@ -59,6 +75,14 @@ class ConfigCubit extends Cubit<ConfigState> {
 
   void setDims(int dims) {
     state.config.problem.dims = dims;
+    final b = state.config.problem.bounds;
+    if (b.kind == 'per_dim') {
+      final old = b.items ?? [];
+      b.items = List.generate(
+        dims,
+            (i) => i < old.length ? old[i] : [b.low, b.high],
+      );
+    }
     _emitUpdated();
   }
 

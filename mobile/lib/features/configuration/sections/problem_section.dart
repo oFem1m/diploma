@@ -60,6 +60,7 @@ class ProblemSection extends StatelessWidget {
                 children: [
                   Expanded(
                     child: TextFormField(
+                      key: ValueKey('uniform_low_${problem.bounds.low}'),
                       initialValue: problem.bounds.low.toString(),
                       decoration: const InputDecoration(
                         labelText: 'Мин.',
@@ -78,6 +79,7 @@ class ProblemSection extends StatelessWidget {
                   const SizedBox(width: 12),
                   Expanded(
                     child: TextFormField(
+                      key: ValueKey('uniform_high_${problem.bounds.high}'),
                       initialValue: problem.bounds.high.toString(),
                       decoration: const InputDecoration(
                         labelText: 'Макс.',
@@ -94,6 +96,64 @@ class ProblemSection extends StatelessWidget {
                     ),
                   ),
                 ],
+              ),
+            if (problem.bounds.kind == 'per_dim')
+              Column(
+                children: List.generate(problem.dims, (i) {
+                  final item = (problem.bounds.items != null &&
+                      i < problem.bounds.items!.length)
+                      ? problem.bounds.items![i]
+                      : [problem.bounds.low, problem.bounds.high];
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 56,
+                          child: Text('x${i + 1}',
+                              style: Theme.of(context).textTheme.bodyLarge),
+                        ),
+                        Expanded(
+                          child: TextFormField(
+                            key: ValueKey('per_dim_low_${i}_${item[0]}'),
+                            initialValue: item[0].toString(),
+                            decoration: const InputDecoration(
+                              labelText: 'Мин.',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(
+                                decimal: true, signed: true),
+                            onChanged: (v) {
+                              final val = double.tryParse(v);
+                              if (val != null) {
+                                cubit.setBoundsPerDim(i, val, item[1]);
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: TextFormField(
+                            key: ValueKey('per_dim_high_${i}_${item[1]}'),
+                            initialValue: item[1].toString(),
+                            decoration: const InputDecoration(
+                              labelText: 'Макс.',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(
+                                decimal: true, signed: true),
+                            onChanged: (v) {
+                              final val = double.tryParse(v);
+                              if (val != null) {
+                                cubit.setBoundsPerDim(i, item[0], val);
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
               ),
           ],
         );
