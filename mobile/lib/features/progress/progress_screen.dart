@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/formatters/number_formatters.dart';
 import '../../core/models/job_result.dart';
 import '../../core/protocol/models.dart';
 import '../../core/ws/ws_client.dart';
@@ -91,7 +92,7 @@ class ProgressScreen extends StatelessWidget {
                                   style: Theme.of(context).textTheme.labelLarge,
                                 ),
                                 Text(
-                                  state.bestF!.toStringAsExponential(6),
+                                  formatBestF(state.bestF!),
                                   style: Theme.of(context)
                                       .textTheme
                                       .headlineMedium

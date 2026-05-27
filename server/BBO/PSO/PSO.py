@@ -99,6 +99,9 @@ class PSO:
                     "best_f": gbest_fit,
                     "best_x": gbest_pos.tolist(),
                     "history_best_f_tail": history_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fit.copy(),
+                    "velocities": V.copy(),
                 })
 
         return {

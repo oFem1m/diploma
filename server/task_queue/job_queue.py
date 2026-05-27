@@ -25,17 +25,18 @@ class JobQueue:
         self._idempotency: Dict[str, str] = {}
         self._order_counter: int = 0
 
-    async def submit(self, payload: Dict[str, Any], client_req_id: str, priority: str = "normal", ws=None) -> Tuple[Job, bool]:
+    async def submit(self, payload: Dict[str, Any], client_req_id: str, priority: str = "normal", ws=None, ws_send_lock=None) -> Tuple[Job, bool]:
         if client_req_id in self._idempotency:
             existing_job_id = self._idempotency[client_req_id]
             if existing_job_id in self._registry:
                 job = self._registry[existing_job_id]
-                self.attach_ws(job.job_id, ws)
+                self.attach_ws(job.job_id, ws, ws_send_lock)
                 return job, False
 
         priority_int = PRIORITY_MAP.get(priority, 1)
         job = Job(client_req_id=client_req_id, payload=payload, priority=priority_int)
         job.ws = ws
+        job.ws_send_lock = ws_send_lock
 
         if self._queue.full():
             raise QueueOverflowError(f"queue full (max {self._queue.maxsize})")
@@ -47,7 +48,7 @@ class JobQueue:
 
         return job, True
 
-    def attach_ws(self, job_id: str, ws) -> bool:
+    def attach_ws(self, job_id: str, ws, ws_send_lock=None) -> bool:
         job = self._registry.get(job_id)
         if not job or job.is_terminal:
             return False
@@ -55,6 +56,7 @@ class JobQueue:
             job.disconnect_task.cancel()
             job.disconnect_task = None
         job.ws = ws
+        job.ws_send_lock = ws_send_lock
         return True
 
     def detach_ws_later(self, job_id: str, ws, delay_s: int) -> bool:

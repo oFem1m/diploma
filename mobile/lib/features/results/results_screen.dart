@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/formatters/number_formatters.dart';
 import '../../core/models/job_config.dart';
 import '../../core/models/method_configs.dart';
 import '../../core/protocol/models.dart';
@@ -58,13 +59,13 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 padding: const EdgeInsets.all(16),
                 child: Column(
                   children: [
-                    Text('Лучшее f(x)',
-                        style: Theme.of(context).textTheme.labelLarge),
                     Text(
-                      r.bestF.toStringAsExponential(8),
-                      style: Theme.of(context)
-                          .textTheme
-                          .headlineMedium
+                      'Лучшее f(x)',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    Text(
+                      formatBestF(r.bestF),
+                      style: Theme.of(context).textTheme.headlineMedium
                           ?.copyWith(
                             fontWeight: FontWeight.bold,
                             color: Colors.indigo,
@@ -81,29 +82,36 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Лучшее x',
-                        style: Theme.of(context).textTheme.titleSmall),
+                    Text(
+                      'Лучшее x',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
                     const SizedBox(height: 8),
-                    ...List.generate(r.bestX.length, (i) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 40,
-                            child: Text('x$i',
+                    ...List.generate(
+                      r.bestX.length,
+                      (i) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 40,
+                              child: Text(
+                                'x$i',
                                 style: const TextStyle(
-                                    fontWeight: FontWeight.w600)),
-                          ),
-                          Expanded(
-                            child: Text(
-                              r.bestX[i].toStringAsFixed(8),
-                              style: const TextStyle(
-                                  fontFamily: 'monospace'),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                             ),
-                          ),
-                        ],
+                            Expanded(
+                              child: Text(
+                                r.bestX[i].toStringAsFixed(8),
+                                style: const TextStyle(fontFamily: 'monospace'),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                    )),
+                    ),
                   ],
                 ),
               ),
@@ -115,23 +123,25 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Метрики',
-                        style: Theme.of(context).textTheme.titleSmall),
+                    Text(
+                      'Метрики',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
                     const SizedBox(height: 8),
                     _MetricRow('Метод', methodNames[m.method] ?? m.method),
                     _MetricRow('Итерации', m.iterations.toString()),
                     _MetricRow('Вычисления', m.evals.toString()),
-                    _MetricRow('Время',
-                        '${(m.wallTimeMs / 1000).toStringAsFixed(2)}с'),
-                    if (m.seed != null)
-                      _MetricRow('Seed', m.seed.toString()),
+                    _MetricRow(
+                      'Время',
+                      '${(m.wallTimeMs / 1000).toStringAsFixed(2)}с',
+                    ),
+                    if (m.seed != null) _MetricRow('Seed', m.seed.toString()),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 16),
-            Text('Сходимость',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text('Сходимость', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             SizedBox(
               height: 250,
@@ -139,8 +149,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
             ),
             if (isBuiltin && dims >= 2) ...[
               const SizedBox(height: 16),
-              Text('2D-визуализация',
-                  style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                '2D-визуализация',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
               if (dims > 2) ...[
                 const SizedBox(height: 8),
                 Row(
@@ -155,11 +167,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
                         ),
                         items: List.generate(
                           dims,
-                          (i) => DropdownMenuItem(
-                              value: i, child: Text('x$i')),
+                          (i) => DropdownMenuItem(value: i, child: Text('x$i')),
                         ),
-                        onChanged: (v) =>
-                            setState(() => _projX = v!),
+                        onChanged: (v) => setState(() => _projX = v!),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -173,11 +183,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
                         ),
                         items: List.generate(
                           dims,
-                          (i) => DropdownMenuItem(
-                              value: i, child: Text('x$i')),
+                          (i) => DropdownMenuItem(value: i, child: Text('x$i')),
                         ),
-                        onChanged: (v) =>
-                            setState(() => _projY = v!),
+                        onChanged: (v) => setState(() => _projY = v!),
                       ),
                     ),
                   ],
@@ -197,8 +205,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
               ),
               const SizedBox(height: 12),
               if (_gifBytes != null) ...[
-                Text('GIF-анимация оптимизации',
-                    style: Theme.of(context).textTheme.titleSmall),
+                Text(
+                  'GIF-анимация оптимизации',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
@@ -207,7 +217,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 const SizedBox(height: 8),
               ],
               FilledButton.icon(
-                onPressed: _gifGenerating ? null : () => _generateGif(functionName),
+                onPressed: _gifGenerating
+                    ? null
+                    : () => _generateGif(functionName),
                 icon: _gifGenerating
                     ? const SizedBox(
                         width: 18,
@@ -215,7 +227,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.gif_box),
-                label: Text(_gifGenerating ? 'Генерация GIF...' : 'Сгенерировать GIF'),
+                label: Text(
+                  _gifGenerating ? 'Генерация GIF...' : 'Сгенерировать GIF',
+                ),
               ),
               const SizedBox(height: 8),
               FilledButton.icon(
@@ -238,13 +252,17 @@ class _ResultsScreenState extends State<ResultsScreen> {
                       itemCount: population.length,
                       itemBuilder: (_, i) => Padding(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 2),
+                          horizontal: 16,
+                          vertical: 2,
+                        ),
                         child: Text(
                           population[i]
                               .map((v) => v.toStringAsFixed(4))
                               .join(', '),
                           style: const TextStyle(
-                              fontFamily: 'monospace', fontSize: 11),
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                          ),
                         ),
                       ),
                     ),
@@ -265,7 +283,8 @@ class _ResultsScreenState extends State<ResultsScreen> {
                             child: BlocProvider.value(
                               value: context.read<ConnectionCubit>(),
                               child: ConfigScreen(
-                                  capabilities: widget.capabilities),
+                                capabilities: widget.capabilities,
+                              ),
                             ),
                           ),
                         ),
@@ -287,7 +306,8 @@ class _ResultsScreenState extends State<ResultsScreen> {
                             child: BlocProvider.value(
                               value: context.read<ConnectionCubit>(),
                               child: HistoryScreen(
-                                  capabilities: widget.capabilities),
+                                capabilities: widget.capabilities,
+                              ),
                             ),
                           ),
                         ),
@@ -357,9 +377,9 @@ class _ResultsScreenState extends State<ResultsScreen> {
     } catch (_) {
       if (mounted) {
         setState(() => _gifGenerating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Ошибка генерации GIF')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Ошибка генерации GIF')));
       }
     }
   }
@@ -378,8 +398,10 @@ class _MetricRow extends StatelessWidget {
         children: [
           SizedBox(
             width: 120,
-            child: Text(label,
-                style: const TextStyle(fontWeight: FontWeight.w500)),
+            child: Text(
+              label,
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
           ),
           Expanded(child: Text(value)),
         ],

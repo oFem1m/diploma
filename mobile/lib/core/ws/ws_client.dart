@@ -20,6 +20,7 @@ class WsClient {
   bool _isReconnecting = false;
   int _reconnectDelaySeconds = 0;
   int _reconnectRemainingSeconds = 0;
+  bool _awaitingPong = false;
   final List<Map<String, dynamic>> _pendingEnvelopes = [];
   static const _maxReconnectDelay = 30;
   static const _pingIntervalSeconds = 5;
@@ -82,7 +83,6 @@ class WsClient {
   }
 
   void _onMessage(String raw) {
-    _pongTimeoutTimer?.cancel();
     final envelope = parseEnvelope(raw);
     final type = getType(envelope);
     final payload = getPayload(envelope);
@@ -110,6 +110,8 @@ class WsClient {
       case MessageTypes.error:
         _eventController.add(WsError(ProtocolError.fromPayload(payload)));
       case MessageTypes.pong:
+        _awaitingPong = false;
+        _pongTimeoutTimer?.cancel();
         _eventController.add(WsPong());
     }
   }
@@ -119,6 +121,7 @@ class WsClient {
     _channel = null;
     _pingTimer?.cancel();
     _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
     if (!_intentionalClose) {
       _eventController.add(WsDisconnected(reason: 'Connection lost'));
       _scheduleReconnect();
@@ -174,11 +177,9 @@ class WsClient {
     _pingTimer = Timer.periodic(const Duration(seconds: _pingIntervalSeconds), (
       _,
     ) {
-      if (_channel != null) {
-        send(buildEnvelope(type: MessageTypes.ping, payload: {}));
-        _startPongTimeout();
-      }
+      _sendPing();
     });
+    _sendPing();
   }
 
   void _startPongTimeout() {
@@ -188,12 +189,20 @@ class WsClient {
     });
   }
 
+  void _sendPing() {
+    if (_channel == null || _awaitingPong) return;
+    _awaitingPong = true;
+    send(buildEnvelope(type: MessageTypes.ping, payload: {}));
+    _startPongTimeout();
+  }
+
   void _handleConnectionLost(String reason) {
     if (_channel == null || _intentionalClose) return;
     _channel?.sink.close();
     _channel = null;
     _pingTimer?.cancel();
     _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
     _eventController.add(WsDisconnected(reason: reason));
     _scheduleReconnect();
   }
@@ -280,6 +289,7 @@ class WsClient {
     _intentionalClose = true;
     _pingTimer?.cancel();
     _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
     _cancelReconnectTimers();
     _pendingEnvelopes.clear();
     await _channel?.sink.close();
@@ -290,6 +300,7 @@ class WsClient {
     _intentionalClose = true;
     _pingTimer?.cancel();
     _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
     _cancelReconnectTimers();
     _pendingEnvelopes.clear();
     _channel?.sink.close();

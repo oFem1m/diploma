@@ -114,6 +114,8 @@ class BBO_Sinusoidal_Modified:
                     "best_f": best_f,
                     "best_x": best_x.tolist(),
                     "history_best_f_tail": history_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fit.copy(),
                 })
 
         return {

@@ -106,7 +106,7 @@ class JobStarted {
 class ProgressData {
   final int iteration;
   final int maxIterations;
-  final double bestF;
+  final double? bestF;
   final List<double>? bestX;
   final List<double>? historyBestFTail;
   final int elapsedMs;
@@ -114,7 +114,7 @@ class ProgressData {
   ProgressData({
     required this.iteration,
     required this.maxIterations,
-    required this.bestF,
+    this.bestF,
     this.bestX,
     this.historyBestFTail,
     required this.elapsedMs,
@@ -124,7 +124,7 @@ class ProgressData {
     return ProgressData(
       iteration: json['iteration'] as int,
       maxIterations: json['max_iterations'] as int,
-      bestF: (json['best_f'] as num).toDouble(),
+      bestF: json['best_f'] != null ? (json['best_f'] as num).toDouble() : null,
       bestX: json['best_x'] != null
           ? List<double>.from(
               (json['best_x'] as List).map((e) => (e as num).toDouble()),
@@ -145,8 +145,9 @@ class ProgressData {
 class JobProgress {
   final String jobId;
   final ProgressData progress;
+  final ProgressSnapshots? snapshots;
 
-  JobProgress({required this.jobId, required this.progress});
+  JobProgress({required this.jobId, required this.progress, this.snapshots});
 
   factory JobProgress.fromPayload(Map<String, dynamic> payload) {
     return JobProgress(
@@ -154,8 +155,43 @@ class JobProgress {
       progress: ProgressData.fromJson(
         payload['progress'] as Map<String, dynamic>,
       ),
+      snapshots: payload['snapshots'] != null
+          ? ProgressSnapshots.fromJson(
+              payload['snapshots'] as Map<String, dynamic>,
+            )
+          : null,
     );
   }
+}
+
+class ProgressSnapshots {
+  final List<List<double>>? population;
+  final List<double>? fitness;
+  final List<List<double>>? velocities;
+
+  ProgressSnapshots({this.population, this.fitness, this.velocities});
+
+  factory ProgressSnapshots.fromJson(Map<String, dynamic> json) {
+    return ProgressSnapshots(
+      population: _parseMatrix(json['population']),
+      fitness: json['fitness'] != null
+          ? List<double>.from(
+              (json['fitness'] as List).map((e) => (e as num).toDouble()),
+            )
+          : null,
+      velocities: _parseMatrix(json['velocities']),
+    );
+  }
+}
+
+List<List<double>>? _parseMatrix(dynamic data) {
+  if (data == null) return null;
+  return (data as List)
+      .map(
+        (row) =>
+            List<double>.from((row as List).map((e) => (e as num).toDouble())),
+      )
+      .toList();
 }
 
 class ResultMetrics {

@@ -100,6 +100,8 @@ class ClassicBBO:
                     "best_f": best_f,
                     "best_x": best_x.tolist(),
                     "history_best_f_tail": hist_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fitness.copy(),
                 })
 
         order = np.argsort(fitness)

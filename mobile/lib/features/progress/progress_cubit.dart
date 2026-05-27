@@ -262,15 +262,16 @@ class ProgressCubit extends Cubit<ProgressState> {
           newLiveHistory.add(v);
         }
       }
-    } else if (newHistory.isEmpty || progress.iteration > previousIteration) {
+    } else if (progress.bestF != null &&
+        (newHistory.isEmpty || progress.iteration > previousIteration)) {
       if (_hadConnectionGap && state.iteration > 0) {
         final missedPoints = progress.iteration - previousIteration - 1;
         if (missedPoints > 0) {
           newLiveHistory.addAll(List<double?>.filled(missedPoints, null));
         }
       }
-      newHistory.add(progress.bestF);
-      newLiveHistory.add(progress.bestF);
+      newHistory.add(progress.bestF!);
+      newLiveHistory.add(progress.bestF!);
     }
     _hadConnectionGap = false;
     final newHistoryX = List<List<double>>.from(state.historyBestX);

@@ -380,8 +380,27 @@
 - `mode="per_generation"` — прогресс на каждом шаге.
 - `mode="every_k"` — прогресс раз в `every_k` шагов.
 - `mode="none"` — без прогресса, только `job.result`.
+- `include.best_x` управляет наличием `progress.best_x`.
+- `include.best_f` управляет наличием `progress.best_f` и `progress.history_best_f_tail`.
+- `include.population`, `include.fitness` и `include.velocities` управляют одноимёнными полями в `snapshots`.
 
 Рекомендуется по умолчанию отправлять только `best_x` и `best_f`, а большие массивы включать только при необходимости.
+
+Поле `velocities` используется только для методов, в которых есть скорости частиц, например `pso`.
+
+## 10.1 Настройки итогового результата (output)
+
+```json
+"output": {
+  "return_final_population": true,
+  "return_final_fitness": true,
+  "return_final_velocities": false
+}
+```
+
+- `return_final_population` управляет возвратом `final_population` для BBO и `final_positions` для PSO.
+- `return_final_fitness` управляет возвратом `final_fitness`, если метод его формирует.
+- `return_final_velocities` управляет возвратом `final_velocities` и используется только для PSO.
 
 ---
 
@@ -436,7 +455,7 @@
 
 ## 12. Прогресс выполнения (job.progress)
 
-### 12.1 Минимальный прогресс
+### 12.1 Прогресс
 
 ```json
 {
@@ -466,11 +485,11 @@
 }
 ```
 
-Рекомендация: поле `history_best_f_tail` содержит только последние значения истории (например 10–100 значений), чтобы не пересылать всю историю на каждом шаге.
+Поля `best_f`, `best_x` и `history_best_f_tail` зависят от настроек `streaming.include`. Поле `history_best_f_tail` содержит только последние значения истории (например 10–100 значений), чтобы не пересылать всю историю на каждом шаге.
 
 ### 12.2 Ссылки на chunked-данные
 
-Если включены `include.population`, `include.fitness` или `include.velocities`, сервер может отправить ссылку:
+Если включены `include.population`, `include.fitness` или `include.velocities`, сервер может отправить данные напрямую или ссылку на chunked-поток:
 
 ```json
 {

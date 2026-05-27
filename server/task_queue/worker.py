@@ -94,15 +94,7 @@ class Worker:
 
             await self._send(job, "job.result", {
                 "job_id": job.job_id,
-                "result": {
-                    "best_x": result["best_x"],
-                    "best_f": result["best_f"],
-                    "history_best_f": result.get("history_best_f", []),
-                    "final_population": result.get("final_population"),
-                    "final_fitness": result.get("final_fitness"),
-                    "final_positions": result.get("final_positions"),
-                    "final_velocities": result.get("final_velocities"),
-                },
+                "result": self._build_result_payload(job, result),
                 "metrics": {
                     "method": result.get("method", "unknown"),
                     "iterations": iterations,
@@ -167,21 +159,55 @@ class Worker:
                 "progress": {
                     "iteration": data["iteration"],
                     "max_iterations": data["max_iterations"],
-                    "best_f": data["best_f"],
                     "elapsed_ms": data.get("elapsed_ms", 0),
                 },
                 "snapshots": None,
             }
 
+            if include.get("best_f", True):
+                progress_payload["progress"]["best_f"] = data["best_f"]
+                if data.get("history_best_f_tail"):
+                    progress_payload["progress"]["history_best_f_tail"] = data["history_best_f_tail"]
             if include.get("best_x", True):
                 progress_payload["progress"]["best_x"] = data.get("best_x")
-            if include.get("best_f", True):
-                pass
-            if data.get("history_best_f_tail"):
-                progress_payload["progress"]["history_best_f_tail"] = data["history_best_f_tail"]
+            snapshots = {}
+            if include.get("population", False) and data.get("population") is not None:
+                snapshots["population"] = self._to_jsonable(data.get("population"))
+            if include.get("fitness", False) and data.get("fitness") is not None:
+                snapshots["fitness"] = self._to_jsonable(data.get("fitness"))
+            if include.get("velocities", False) and data.get("velocities") is not None:
+                snapshots["velocities"] = self._to_jsonable(data.get("velocities"))
+            if snapshots:
+                progress_payload["snapshots"] = snapshots
 
             job.last_progress = progress_payload["progress"]
             await self._send(job, "job.progress", progress_payload)
+
+    def _build_result_payload(self, job: Job, result: Dict[str, Any]) -> Dict[str, Any]:
+        output = job.payload.get("output", {})
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+
+        result_payload = {
+            "best_x": result["best_x"],
+            "best_f": result["best_f"],
+            "history_best_f": result.get("history_best_f", []),
+        }
+        if output.get("return_final_population", True):
+            if result.get("final_population") is not None:
+                result_payload["final_population"] = result.get("final_population")
+            if result.get("final_positions") is not None:
+                result_payload["final_positions"] = result.get("final_positions")
+        if output.get("return_final_fitness", True) and result.get("final_fitness") is not None:
+            result_payload["final_fitness"] = result.get("final_fitness")
+        if output.get("return_final_velocities", False) and result.get("final_velocities") is not None:
+            result_payload["final_velocities"] = result.get("final_velocities")
+        return result_payload
+
+    def _to_jsonable(self, value):
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return value
 
     async def _send_finished(self, job: Job, final_state: str):
         await self._send(job, "job.finished", {
@@ -209,7 +235,11 @@ class Worker:
             }
             msg = build_envelope(msg_type, payload, trace=trace)
             import json
-            await job.ws.send_text(json.dumps(msg, default=str))
+            if job.ws_send_lock:
+                async with job.ws_send_lock:
+                    await job.ws.send_text(json.dumps(msg, default=str))
+            else:
+                await job.ws.send_text(json.dumps(msg, default=str))
         except Exception:
             logger.debug("failed to send %s to job %s", msg_type, job.job_id)
 

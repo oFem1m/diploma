@@ -33,6 +33,7 @@ class Job:
         self.result: Optional[Dict[str, Any]] = None
         self.error: Optional[str] = None
         self.ws = None
+        self.ws_send_lock: Optional[asyncio.Lock] = None
         self.last_progress: Optional[Dict[str, Any]] = None
         self.disconnect_task: Optional[asyncio.Task] = None
 

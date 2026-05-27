@@ -1,5 +1,6 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import '../../core/formatters/number_formatters.dart';
 
 class ConvergenceChart extends StatelessWidget {
   final List<double> values;
@@ -33,14 +34,15 @@ class ConvergenceChart extends StatelessWidget {
             sideTitles: SideTitles(showTitles: true, reservedSize: 50),
           ),
           bottomTitles: const AxisTitles(
-            axisNameWidget:
-                Text('Итерация', style: TextStyle(fontSize: 11)),
+            axisNameWidget: Text('Итерация', style: TextStyle(fontSize: 11)),
             sideTitles: SideTitles(showTitles: true, reservedSize: 30),
           ),
-          topTitles:
-              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-          rightTitles:
-              const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          topTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
+          rightTitles: const AxisTitles(
+            sideTitles: SideTitles(showTitles: false),
+          ),
         ),
         borderData: FlBorderData(show: true),
         lineBarsData: [
@@ -60,7 +62,7 @@ class ConvergenceChart extends StatelessWidget {
           touchTooltipData: LineTouchTooltipData(
             getTooltipItems: (spots) => spots.map((s) {
               return LineTooltipItem(
-                'Ит: ${s.x.toInt()}\nf: ${s.y.toStringAsExponential(4)}',
+                'Ит: ${s.x.toInt()}\nf: ${formatBestF(s.y, maxPlainLength: 12)}',
                 const TextStyle(color: Colors.white, fontSize: 11),
               );
             }).toList(),
@@ -95,8 +97,7 @@ class MultiConvergenceChart extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectiveColors =
-        colors.isEmpty ? _defaultColors : colors;
+    final effectiveColors = colors.isEmpty ? _defaultColors : colors;
 
     final bars = <LineChartBarData>[];
     for (int s = 0; s < series.length; s++) {
@@ -104,13 +105,15 @@ class MultiConvergenceChart extends StatelessWidget {
       for (int i = 0; i < series[s].length; i++) {
         spots.add(FlSpot(i.toDouble(), series[s][i]));
       }
-      bars.add(LineChartBarData(
-        spots: spots,
-        isCurved: false,
-        color: effectiveColors[s % effectiveColors.length],
-        barWidth: 2,
-        dotData: const FlDotData(show: false),
-      ));
+      bars.add(
+        LineChartBarData(
+          spots: spots,
+          isCurved: false,
+          color: effectiveColors[s % effectiveColors.length],
+          barWidth: 2,
+          dotData: const FlDotData(show: false),
+        ),
+      );
     }
 
     return Column(
@@ -139,19 +142,21 @@ class MultiConvergenceChart extends StatelessWidget {
               gridData: const FlGridData(show: true),
               titlesData: FlTitlesData(
                 leftTitles: const AxisTitles(
-                  sideTitles:
-                      SideTitles(showTitles: true, reservedSize: 50),
+                  sideTitles: SideTitles(showTitles: true, reservedSize: 50),
                 ),
                 bottomTitles: const AxisTitles(
-                  axisNameWidget:
-                      Text('Итерация', style: TextStyle(fontSize: 11)),
-                  sideTitles:
-                      SideTitles(showTitles: true, reservedSize: 30),
+                  axisNameWidget: Text(
+                    'Итерация',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                  sideTitles: SideTitles(showTitles: true, reservedSize: 30),
                 ),
                 topTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false)),
+                  sideTitles: SideTitles(showTitles: false),
+                ),
                 rightTitles: const AxisTitles(
-                    sideTitles: SideTitles(showTitles: false)),
+                  sideTitles: SideTitles(showTitles: false),
+                ),
               ),
               borderData: FlBorderData(show: true),
               lineBarsData: bars,

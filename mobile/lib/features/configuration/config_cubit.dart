@@ -15,7 +15,11 @@ class ConfigState extends Equatable {
     int version = 0,
   }) : _version = version;
 
-  ConfigState copyWith({JobConfig? config, String? validationError, int? version}) {
+  ConfigState copyWith({
+    JobConfig? config,
+    String? validationError,
+    int? version,
+  }) {
     return ConfigState(
       config: config ?? this.config,
       validationError: validationError,
@@ -49,8 +53,7 @@ class ConfigCubit extends Cubit<ConfigState> {
     if (pd != null) {
       state.config.problem.dims = pd.length;
       state.config.problem.bounds.kind = 'per_dim';
-      state.config.problem.bounds.items =
-          pd.map((p) => [p[0], p[1]]).toList();
+      state.config.problem.bounds.items = pd.map((p) => [p[0], p[1]]).toList();
     } else {
       final b = defaultBoundsUniform[name];
       if (b != null) {
@@ -80,7 +83,7 @@ class ConfigCubit extends Cubit<ConfigState> {
       final old = b.items ?? [];
       b.items = List.generate(
         dims,
-            (i) => i < old.length ? old[i] : [b.low, b.high],
+        (i) => i < old.length ? old[i] : [b.low, b.high],
       );
     }
     _emitUpdated();
@@ -91,7 +94,10 @@ class ConfigCubit extends Cubit<ConfigState> {
     if (kind == 'per_dim' && state.config.problem.bounds.items == null) {
       state.config.problem.bounds.items = List.generate(
         state.config.problem.dims,
-        (_) => [state.config.problem.bounds.low, state.config.problem.bounds.high],
+        (_) => [
+          state.config.problem.bounds.low,
+          state.config.problem.bounds.high,
+        ],
       );
     }
     _emitUpdated();
@@ -111,6 +117,10 @@ class ConfigCubit extends Cubit<ConfigState> {
   void setMethod(String method) {
     state.config.methodName = method;
     state.config.methodConfig = createDefaultConfig(method);
+    if (!isPsoMethod(method)) {
+      state.config.streaming.include.velocities = false;
+      state.config.output.returnFinalVelocities = false;
+    }
     _emitUpdated();
   }
 

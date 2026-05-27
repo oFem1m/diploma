@@ -222,7 +222,7 @@ class JobStartedPayload(BaseModel):
 class ProgressData(BaseModel):
     iteration: int
     max_iterations: int
-    best_f: float
+    best_f: Optional[float] = None
     best_x: Optional[List[float]] = None
     history_best_f_tail: Optional[List[float]] = None
     elapsed_ms: Optional[int] = None

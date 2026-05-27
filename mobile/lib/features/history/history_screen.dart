@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import '../../core/formatters/number_formatters.dart';
 import '../../core/models/job_config.dart';
 import '../../core/models/method_configs.dart';
 import '../../core/protocol/models.dart';
@@ -83,8 +84,10 @@ class _HistoryBody extends StatelessWidget {
           return Column(
             children: [
               Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
                 child: Row(
                   children: [
                     Expanded(
@@ -98,13 +101,18 @@ class _HistoryBody extends StatelessWidget {
                         isExpanded: true,
                         items: [
                           const DropdownMenuItem(
-                              value: null, child: Text('Все')),
-                          ...methodNames.entries.map((e) => DropdownMenuItem(
+                            value: null,
+                            child: Text('Все'),
+                          ),
+                          ...methodNames.entries.map(
+                            (e) => DropdownMenuItem(
                               value: e.key,
                               child: Text(
                                 e.value,
                                 overflow: TextOverflow.ellipsis,
-                              ))),
+                              ),
+                            ),
+                          ),
                         ],
                         onChanged: (v) =>
                             context.read<HistoryCubit>().setFilterMethod(v),
@@ -123,17 +131,24 @@ class _HistoryBody extends StatelessWidget {
                         items: const [
                           DropdownMenuItem(value: null, child: Text('Все')),
                           DropdownMenuItem(
-                              value: 'sphere', child: Text('sphere')),
+                            value: 'sphere',
+                            child: Text('sphere'),
+                          ),
                           DropdownMenuItem(
-                              value: 'rastrigin', child: Text('rastrigin')),
+                            value: 'rastrigin',
+                            child: Text('rastrigin'),
+                          ),
                           DropdownMenuItem(
-                              value: 'ackley', child: Text('ackley')),
+                            value: 'ackley',
+                            child: Text('ackley'),
+                          ),
                           DropdownMenuItem(
-                              value: 'bukin6', child: Text('bukin6')),
+                            value: 'bukin6',
+                            child: Text('bukin6'),
+                          ),
                         ],
-                        onChanged: (v) => context
-                            .read<HistoryCubit>()
-                            .setFilterObjective(v),
+                        onChanged: (v) =>
+                            context.read<HistoryCubit>().setFilterObjective(v),
                       ),
                     ),
                   ],
@@ -167,11 +182,11 @@ class _HistoryBody extends StatelessWidget {
 
                     return Card(
                       margin: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 4),
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
                       color: isSelected
-                          ? Theme.of(context)
-                              .colorScheme
-                              .primaryContainer
+                          ? Theme.of(context).colorScheme.primaryContainer
                           : null,
                       child: ListTile(
                         leading: CircleAvatar(
@@ -188,13 +203,12 @@ class _HistoryBody extends StatelessWidget {
                         ),
                         subtitle: Text(
                           '${r.objectiveName} | ${r.dims}D | '
-                          'f=${r.bestF.toStringAsExponential(4)}\n'
+                          'f=${formatBestF(r.bestF, maxPlainLength: 12)}\n'
                           '${DateFormat.yMd().add_Hms().format(r.createdAt)}',
                         ),
                         isThreeLine: true,
                         trailing: PopupMenuButton<String>(
-                          onSelected: (v) =>
-                              _onAction(context, v, r),
+                          onSelected: (v) => _onAction(context, v, r),
                           itemBuilder: (_) => [
                             if (r.resultData != null)
                               const PopupMenuItem(
@@ -209,9 +223,7 @@ class _HistoryBody extends StatelessWidget {
                         ),
                         onTap: () {
                           if (r.id != null) {
-                            context
-                                .read<HistoryCubit>()
-                                .toggleSelection(r.id!);
+                            context.read<HistoryCubit>().toggleSelection(r.id!);
                           }
                         },
                         onLongPress: () {
@@ -231,8 +243,7 @@ class _HistoryBody extends StatelessWidget {
     );
   }
 
-  void _onAction(BuildContext context, String action,
-      dynamic r) {
+  void _onAction(BuildContext context, String action, dynamic r) {
     switch (action) {
       case 'view':
         _viewResult(context, r);
@@ -254,10 +265,7 @@ class _HistoryBody extends StatelessWidget {
 
     final config = JobConfig(
       methodName: r.method,
-      objective: ObjectiveConfig(
-        kind: r.objectiveKind,
-        name: r.objectiveName,
-      ),
+      objective: ObjectiveConfig(kind: r.objectiveKind, name: r.objectiveName),
       problem: ProblemConfig(dims: r.dims),
     );
 
@@ -284,9 +292,7 @@ class _HistoryBody extends StatelessWidget {
     if (selected.length < 2) return;
 
     Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ComparisonScreen(results: selected),
-      ),
+      MaterialPageRoute(builder: (_) => ComparisonScreen(results: selected)),
     );
   }
 

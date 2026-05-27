@@ -1,5 +1,6 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import '../../core/formatters/number_formatters.dart';
 import '../../core/models/job_result.dart';
 import '../../core/models/method_configs.dart';
 import '../results/convergence_chart.dart';
@@ -28,8 +29,10 @@ class ComparisonScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('Сравнение сходимости',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Сравнение сходимости',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             SizedBox(
               height: 300,
@@ -38,15 +41,19 @@ class ComparisonScreen extends StatelessWidget {
                     .map((r) => r.resultData?.historyBestF ?? [])
                     .toList(),
                 labels: results
-                    .map((r) =>
-                        '${methodNames[r.method] ?? r.method} (${r.objectiveName})')
+                    .map(
+                      (r) =>
+                          '${methodNames[r.method] ?? r.method} (${r.objectiveName})',
+                    )
                     .toList(),
                 colors: _colors,
               ),
             ),
             const SizedBox(height: 24),
-            Text('Таблица сравнения',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Таблица сравнения',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -60,26 +67,32 @@ class ComparisonScreen extends StatelessWidget {
                   DataColumn(label: Text('Время (с)'), numeric: true),
                 ],
                 rows: results.map((r) {
-                  return DataRow(cells: [
-                    DataCell(
-                        Text(methodNames[r.method] ?? r.method)),
-                    DataCell(Text(r.objectiveName)),
-                    DataCell(Text(r.dims.toString())),
-                    DataCell(
-                        Text(r.bestF.toStringAsExponential(4))),
-                    DataCell(Text(
-                        r.metrics?.iterations.toString() ?? '-')),
-                    DataCell(Text(r.metrics != null
-                        ? (r.metrics!.wallTimeMs / 1000)
-                            .toStringAsFixed(2)
-                        : '-')),
-                  ]);
+                  return DataRow(
+                    cells: [
+                      DataCell(Text(methodNames[r.method] ?? r.method)),
+                      DataCell(Text(r.objectiveName)),
+                      DataCell(Text(r.dims.toString())),
+                      DataCell(Text(formatBestF(r.bestF, maxPlainLength: 12))),
+                      DataCell(Text(r.metrics?.iterations.toString() ?? '-')),
+                      DataCell(
+                        Text(
+                          r.metrics != null
+                              ? (r.metrics!.wallTimeMs / 1000).toStringAsFixed(
+                                  2,
+                                )
+                              : '-',
+                        ),
+                      ),
+                    ],
+                  );
                 }).toList(),
               ),
             ),
             const SizedBox(height: 24),
-            Text('Лучшее f(x) по методам',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Лучшее f(x) по методам',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
             SizedBox(
               height: 250,
@@ -95,7 +108,8 @@ class ComparisonScreen extends StatelessWidget {
                           color: _colors[i % _colors.length],
                           width: 24,
                           borderRadius: const BorderRadius.vertical(
-                              top: Radius.circular(4)),
+                            top: Radius.circular(4),
+                          ),
                         ),
                       ],
                     );
@@ -125,13 +139,17 @@ class ComparisonScreen extends StatelessWidget {
                       ),
                     ),
                     leftTitles: const AxisTitles(
-                      sideTitles:
-                          SideTitles(showTitles: true, reservedSize: 50),
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 50,
+                      ),
                     ),
                     topTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false)),
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
                     rightTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false)),
+                      sideTitles: SideTitles(showTitles: false),
+                    ),
                   ),
                   borderData: FlBorderData(show: false),
                   gridData: const FlGridData(show: true),

@@ -98,6 +98,8 @@ class BBO_Sinusoidal:
                     "best_f": float(fitness[np.argsort(fitness)[0]]),
                     "best_x": X[np.argsort(fitness)[0]].tolist(),
                     "history_best_f_tail": hist_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fitness.copy(),
                 })
 
         order = np.argsort(fitness)

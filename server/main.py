@@ -67,4 +67,5 @@ if __name__ == "__main__":
         host=config.host,
         port=config.port,
         log_level="info",
+        ws_ping_interval=None,
     )

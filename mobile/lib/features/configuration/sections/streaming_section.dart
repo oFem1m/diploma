@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../../core/models/method_configs.dart';
 import '../config_cubit.dart';
 
 class StreamingSection extends StatelessWidget {
@@ -11,12 +12,15 @@ class StreamingSection extends StatelessWidget {
       builder: (context, state) {
         final cubit = context.read<ConfigCubit>();
         final streaming = state.config.streaming;
+        final isPso = isPsoMethod(state.config.methodName);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Потоковая передача',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Потоковая передача',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
               key: ValueKey('stream_${streaming.mode}'),
@@ -27,7 +31,9 @@ class StreamingSection extends StatelessWidget {
               ),
               items: const [
                 DropdownMenuItem(
-                    value: 'per_generation', child: Text('Каждое поколение')),
+                  value: 'per_generation',
+                  child: Text('Каждое поколение'),
+                ),
                 DropdownMenuItem(value: 'every_k', child: Text('Каждые K')),
                 DropdownMenuItem(value: 'none', child: Text('Отключено')),
               ],
@@ -77,13 +83,14 @@ class StreamingSection extends StatelessWidget {
               dense: true,
               contentPadding: EdgeInsets.zero,
             ),
-            CheckboxListTile(
-              title: const Text('Включить скорости'),
-              value: streaming.include.velocities,
-              onChanged: (v) => cubit.setStreamingInclude('velocities', v!),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-            ),
+            if (isPso)
+              CheckboxListTile(
+                title: const Text('Включить скорости'),
+                value: streaming.include.velocities,
+                onChanged: (v) => cubit.setStreamingInclude('velocities', v!),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+              ),
           ],
         );
       },

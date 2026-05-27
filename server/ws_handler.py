@@ -16,6 +16,7 @@ from protocol.types import (
     JobStatusGetPayload,
 )
 from protocol.validation import validate_job_submit, SUPPORTED_METHODS, SUPPORTED_BUILTINS
+from task_queue.job import Job
 from task_queue.job_queue import JobQueue, QueueOverflowError
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class ConnectionHandler:
         self.config = config
         self._active_jobs: set[str] = set()
         self._ping_task = None
+        self._send_lock = asyncio.Lock()
 
     async def handle(self):
         await self.ws.accept()
@@ -132,6 +134,7 @@ class ConnectionHandler:
                 client_req_id=client_req_id,
                 priority=priority,
                 ws=self.ws,
+                ws_send_lock=self._send_lock,
             )
         except QueueOverflowError:
             await self._send_error(
@@ -209,7 +212,7 @@ class ConnectionHandler:
             return
 
         if not job.is_terminal:
-            self.job_queue.attach_ws(job.job_id, self.ws)
+            self.job_queue.attach_ws(job.job_id, self.ws, self._send_lock)
             self._active_jobs.add(job.job_id)
 
         status_payload = {
@@ -239,20 +242,12 @@ class ConnectionHandler:
     async def _handle_pong(self, envelope):
         return
 
-    async def _send_terminal_snapshot(self, job, *, reply_to: str = None, trace: dict = None):
+    async def _send_terminal_snapshot(self, job: Job, *, reply_to: str = None, trace: dict = None):
         if job.state.value == "succeeded" and job.result:
             history = job.result.get("history_best_f", [])
             await self._send("job.result", {
                 "job_id": job.job_id,
-                "result": {
-                    "best_x": job.result["best_x"],
-                    "best_f": job.result["best_f"],
-                    "history_best_f": history,
-                    "final_population": job.result.get("final_population"),
-                    "final_fitness": job.result.get("final_fitness"),
-                    "final_positions": job.result.get("final_positions"),
-                    "final_velocities": job.result.get("final_velocities"),
-                },
+                "result": self._build_result_payload(job),
                 "metrics": {
                     "method": job.result.get("method", "unknown"),
                     "iterations": len(history),
@@ -267,6 +262,28 @@ class ConnectionHandler:
             "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }, reply_to=reply_to, trace=trace)
 
+    def _build_result_payload(self, job: Job):
+        output = job.payload.get("output", {})
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+
+        result = job.result
+        payload = {
+            "best_x": result["best_x"],
+            "best_f": result["best_f"],
+            "history_best_f": result.get("history_best_f", []),
+        }
+        if output.get("return_final_population", True):
+            if result.get("final_population") is not None:
+                payload["final_population"] = result.get("final_population")
+            if result.get("final_positions") is not None:
+                payload["final_positions"] = result.get("final_positions")
+        if output.get("return_final_fitness", True) and result.get("final_fitness") is not None:
+            payload["final_fitness"] = result.get("final_fitness")
+        if output.get("return_final_velocities", False) and result.get("final_velocities") is not None:
+            payload["final_velocities"] = result.get("final_velocities")
+        return payload
+
     async def _ping_loop(self):
         try:
             while True:
@@ -278,7 +295,8 @@ class ConnectionHandler:
     async def _send(self, msg_type: str, payload: dict, *,
                     reply_to: str = None, trace: dict = None):
         msg = build_envelope(msg_type, payload, reply_to=reply_to, trace=trace)
-        await self.ws.send_text(json.dumps(msg, default=str))
+        async with self._send_lock:
+            await self.ws.send_text(json.dumps(msg, default=str))
 
     async def _send_error(self, code: str, message: str, *,
                           reply_to: str = None, retryable: bool = False):
