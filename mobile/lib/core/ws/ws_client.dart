@@ -11,14 +11,23 @@ class WsClient {
   final _eventController = StreamController<WsEvent>.broadcast();
   Timer? _pingTimer;
   Timer? _reconnectTimer;
+  Timer? _reconnectCountdownTimer;
   String? _host;
   int? _port;
   bool _intentionalClose = false;
   int _reconnectAttempts = 0;
+  bool _isReconnecting = false;
+  int _reconnectDelaySeconds = 0;
+  int _reconnectRemainingSeconds = 0;
+  final List<Map<String, dynamic>> _pendingEnvelopes = [];
   static const _maxReconnectDelay = 30;
 
   Stream<WsEvent> get events => _eventController.stream;
   bool get isConnected => _channel != null;
+  bool get isReconnecting => _isReconnecting;
+  int get reconnectAttempt => _reconnectAttempts;
+  int get reconnectDelaySeconds => _reconnectDelaySeconds;
+  int get reconnectRemainingSeconds => _reconnectRemainingSeconds;
 
   Future<void> connect(String host, int port) async {
     _host = host;
@@ -33,6 +42,8 @@ class WsClient {
       final uri = Uri.parse('ws://$_host:$_port/ws/optimize');
       _channel = WebSocketChannel.connect(uri);
       await _channel!.ready;
+      _cancelReconnectTimers();
+      _reconnectAttempts = 0;
       _eventController.add(WsConnected());
       _startPing();
 
@@ -44,6 +55,7 @@ class WsClient {
 
       _sendHello();
     } catch (e) {
+      _channel = null;
       _eventController.add(WsDisconnected(reason: e.toString()));
       _scheduleReconnect();
     }
@@ -59,10 +71,7 @@ class WsClient {
           'platform': 'android',
           'lang': 'dart',
         },
-        'wants': {
-          'progress_stream': true,
-          'chunking': true,
-        },
+        'wants': {'progress_stream': true, 'chunking': true},
       },
       clientReqId: 'hello-1',
     );
@@ -77,24 +86,21 @@ class WsClient {
     switch (type) {
       case MessageTypes.hello:
         _eventController.add(WsHelloReceived(ServerHello.fromPayload(payload)));
+        _flushPending();
       case MessageTypes.jobAccepted:
-        _eventController
-            .add(WsJobAccepted(JobAccepted.fromPayload(payload)));
+        _eventController.add(WsJobAccepted(JobAccepted.fromPayload(payload)));
       case MessageTypes.jobQueued:
         _eventController.add(WsJobQueued(JobQueued.fromPayload(payload)));
       case MessageTypes.jobStarted:
         _eventController.add(WsJobStarted(JobStarted.fromPayload(payload)));
       case MessageTypes.jobProgress:
-        _eventController
-            .add(WsJobProgress(JobProgress.fromPayload(payload)));
+        _eventController.add(WsJobProgress(JobProgress.fromPayload(payload)));
       case MessageTypes.jobResult:
         _eventController.add(WsJobResult(JobResult.fromPayload(payload)));
       case MessageTypes.jobFinished:
-        _eventController
-            .add(WsJobFinished(JobFinished.fromPayload(payload)));
+        _eventController.add(WsJobFinished(JobFinished.fromPayload(payload)));
       case MessageTypes.error:
-        _eventController
-            .add(WsError(ProtocolError.fromPayload(payload)));
+        _eventController.add(WsError(ProtocolError.fromPayload(payload)));
       case MessageTypes.pong:
         _eventController.add(WsPong());
     }
@@ -113,8 +119,37 @@ class WsClient {
 
   void _scheduleReconnect() {
     if (_intentionalClose || _host == null) return;
+    _cancelReconnectTimers();
     _reconnectAttempts++;
     final delay = _reconnectDelay();
+    var remaining = delay;
+    _isReconnecting = true;
+    _reconnectDelaySeconds = delay;
+    _reconnectRemainingSeconds = remaining;
+    _eventController.add(
+      WsReconnectScheduled(
+        attempt: _reconnectAttempts,
+        delaySeconds: delay,
+        remainingSeconds: remaining,
+      ),
+    );
+    _reconnectCountdownTimer = Timer.periodic(const Duration(seconds: 1), (
+      timer,
+    ) {
+      remaining--;
+      if (remaining <= 0) {
+        timer.cancel();
+        return;
+      }
+      _reconnectRemainingSeconds = remaining;
+      _eventController.add(
+        WsReconnectTick(
+          attempt: _reconnectAttempts,
+          delaySeconds: delay,
+          remainingSeconds: remaining,
+        ),
+      );
+    });
     _reconnectTimer = Timer(Duration(seconds: delay), _doConnect);
   }
 
@@ -133,42 +168,80 @@ class WsClient {
   }
 
   void send(Map<String, dynamic> envelope) {
-    _channel?.sink.add(jsonEncode(envelope));
+    if (_channel == null) {
+      _pendingEnvelopes.add(envelope);
+      return;
+    }
+    _channel!.sink.add(jsonEncode(envelope));
+  }
+
+  void _flushPending() {
+    if (_channel == null || _pendingEnvelopes.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.from(_pendingEnvelopes);
+    _pendingEnvelopes.clear();
+    for (final envelope in pending) {
+      _channel!.sink.add(jsonEncode(envelope));
+    }
+  }
+
+  void _cancelReconnectTimers() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectCountdownTimer?.cancel();
+    _reconnectCountdownTimer = null;
+    _isReconnecting = false;
+    _reconnectDelaySeconds = 0;
+    _reconnectRemainingSeconds = 0;
   }
 
   void submitJob({
     required String clientReqId,
     required Map<String, dynamic> payload,
   }) {
-    send(buildEnvelope(
-      type: MessageTypes.jobSubmit,
-      payload: payload,
-      clientReqId: clientReqId,
-    ));
+    send(
+      buildEnvelope(
+        type: MessageTypes.jobSubmit,
+        payload: payload,
+        clientReqId: clientReqId,
+      ),
+    );
+  }
+
+  void removePendingByClientReqId(String clientReqId) {
+    _pendingEnvelopes.removeWhere((envelope) {
+      final header = envelope['header'] as Map<String, dynamic>?;
+      final trace = header?['trace'] as Map<String, dynamic>?;
+      return trace?['client_req_id'] == clientReqId;
+    });
   }
 
   void cancelJob(String jobId, String clientReqId) {
-    send(buildEnvelope(
-      type: MessageTypes.cancel,
-      payload: {'job_id': jobId, 'reason': 'user_cancel'},
-      clientReqId: clientReqId,
-      jobId: jobId,
-    ));
+    send(
+      buildEnvelope(
+        type: MessageTypes.cancel,
+        payload: {'job_id': jobId, 'reason': 'user_cancel'},
+        clientReqId: clientReqId,
+        jobId: jobId,
+      ),
+    );
   }
 
   void requestStatus(String jobId, String clientReqId) {
-    send(buildEnvelope(
-      type: MessageTypes.jobStatusGet,
-      payload: {'job_id': jobId},
-      clientReqId: clientReqId,
-      jobId: jobId,
-    ));
+    send(
+      buildEnvelope(
+        type: MessageTypes.jobStatusGet,
+        payload: {'job_id': jobId},
+        clientReqId: clientReqId,
+        jobId: jobId,
+      ),
+    );
   }
 
   Future<void> disconnect() async {
     _intentionalClose = true;
     _pingTimer?.cancel();
-    _reconnectTimer?.cancel();
+    _cancelReconnectTimers();
+    _pendingEnvelopes.clear();
     await _channel?.sink.close();
     _channel = null;
   }
@@ -176,7 +249,8 @@ class WsClient {
   void dispose() {
     _intentionalClose = true;
     _pingTimer?.cancel();
-    _reconnectTimer?.cancel();
+    _cancelReconnectTimers();
+    _pendingEnvelopes.clear();
     _channel?.sink.close();
     _eventController.close();
   }

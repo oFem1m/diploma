@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 import '../../core/protocol/models.dart';
 import '../../core/ws/ws_client.dart';
 import '../connection/connection_cubit.dart';
+import '../connection/connection_screen.dart';
 import '../progress/progress_screen.dart';
 import '../progress/progress_cubit.dart';
 import '../history/history_screen.dart';
@@ -35,6 +36,11 @@ class _ConfigScreenBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          tooltip: 'К подключению',
+          onPressed: () => _disconnectAndReturn(context),
+        ),
         title: const Text('Настройка задачи'),
         actions: [
           IconButton(
@@ -59,10 +65,7 @@ class _ConfigScreenBody extends StatelessWidget {
                 value: 'rastrigin_bbo',
                 child: Text('Rastrigin 10D BBO Classic'),
               ),
-              PopupMenuItem(
-                value: 'sphere_pso',
-                child: Text('Sphere 10D PSO'),
-              ),
+              PopupMenuItem(value: 'sphere_pso', child: Text('Sphere 10D PSO')),
               PopupMenuItem(
                 value: 'ackley_modified',
                 child: Text('Ackley 10D BBO Modified'),
@@ -106,8 +109,9 @@ class _ConfigScreenBody extends StatelessWidget {
     final cubit = context.read<ConfigCubit>();
     final error = cubit.validate();
     if (error != null) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(error)));
       return;
     }
 
@@ -122,12 +126,22 @@ class _ConfigScreenBody extends StatelessWidget {
           child: BlocProvider.value(
             value: context.read<ConnectionCubit>(),
             child: BlocProvider(
-              create: (_) => ProgressCubit(ws, config, clientReqId: clientReqId),
+              create: (_) =>
+                  ProgressCubit(ws, config, clientReqId: clientReqId),
               child: ProgressScreen(capabilities: capabilities),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  Future<void> _disconnectAndReturn(BuildContext context) async {
+    await context.read<ConnectionCubit>().disconnect();
+    if (!context.mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const ConnectionScreen()),
+      (_) => false,
     );
   }
 }

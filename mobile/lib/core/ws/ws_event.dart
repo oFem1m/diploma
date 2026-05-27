@@ -9,6 +9,30 @@ class WsDisconnected extends WsEvent {
   WsDisconnected({this.reason});
 }
 
+class WsReconnectScheduled extends WsEvent {
+  final int attempt;
+  final int delaySeconds;
+  final int remainingSeconds;
+
+  WsReconnectScheduled({
+    required this.attempt,
+    required this.delaySeconds,
+    required this.remainingSeconds,
+  });
+}
+
+class WsReconnectTick extends WsEvent {
+  final int attempt;
+  final int delaySeconds;
+  final int remainingSeconds;
+
+  WsReconnectTick({
+    required this.attempt,
+    required this.delaySeconds,
+    required this.remainingSeconds,
+  });
+}
+
 class WsHelloReceived extends WsEvent {
   final ServerHello hello;
   WsHelloReceived(this.hello);

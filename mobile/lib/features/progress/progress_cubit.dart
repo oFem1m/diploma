@@ -6,7 +6,16 @@ import '../../core/protocol/models.dart';
 import '../../core/ws/ws_client.dart';
 import '../../core/ws/ws_event.dart';
 
-enum JobPhase { queued, started, running, succeeded, failed, cancelled, timeout }
+enum JobPhase {
+  submitting,
+  queued,
+  started,
+  running,
+  succeeded,
+  failed,
+  cancelled,
+  timeout,
+}
 
 class ProgressState extends Equatable {
   final JobPhase phase;
@@ -22,9 +31,13 @@ class ProgressState extends Equatable {
   final int? queueEtaMs;
   final JobResult? result;
   final String? errorMessage;
+  final bool isReconnecting;
+  final int reconnectAttempt;
+  final int reconnectDelaySeconds;
+  final int reconnectRemainingSeconds;
 
   const ProgressState({
-    this.phase = JobPhase.queued,
+    this.phase = JobPhase.submitting,
     this.jobId,
     this.iteration = 0,
     this.maxIterations = 1,
@@ -37,6 +50,10 @@ class ProgressState extends Equatable {
     this.queueEtaMs,
     this.result,
     this.errorMessage,
+    this.isReconnecting = false,
+    this.reconnectAttempt = 0,
+    this.reconnectDelaySeconds = 0,
+    this.reconnectRemainingSeconds = 0,
   });
 
   ProgressState copyWith({
@@ -53,6 +70,10 @@ class ProgressState extends Equatable {
     int? queueEtaMs,
     JobResult? result,
     String? errorMessage,
+    bool? isReconnecting,
+    int? reconnectAttempt,
+    int? reconnectDelaySeconds,
+    int? reconnectRemainingSeconds,
   }) {
     return ProgressState(
       phase: phase ?? this.phase,
@@ -68,49 +89,107 @@ class ProgressState extends Equatable {
       queueEtaMs: queueEtaMs ?? this.queueEtaMs,
       result: result ?? this.result,
       errorMessage: errorMessage ?? this.errorMessage,
+      isReconnecting: isReconnecting ?? this.isReconnecting,
+      reconnectAttempt: reconnectAttempt ?? this.reconnectAttempt,
+      reconnectDelaySeconds:
+          reconnectDelaySeconds ?? this.reconnectDelaySeconds,
+      reconnectRemainingSeconds:
+          reconnectRemainingSeconds ?? this.reconnectRemainingSeconds,
     );
   }
 
-  double get progress =>
-      maxIterations > 0 ? iteration / maxIterations : 0;
+  double get progress => maxIterations > 0 ? iteration / maxIterations : 0;
 
   @override
   List<Object?> get props => [
-        phase, jobId, iteration, maxIterations, bestF,
-        historyBestF.length, historyBestX.length, elapsedMs, queuePosition, result, errorMessage,
-      ];
+    phase,
+    jobId,
+    iteration,
+    maxIterations,
+    bestF,
+    historyBestF.length,
+    historyBestX.length,
+    elapsedMs,
+    queuePosition,
+    result,
+    errorMessage,
+    isReconnecting,
+    reconnectAttempt,
+    reconnectDelaySeconds,
+    reconnectRemainingSeconds,
+  ];
 }
 
 class ProgressCubit extends Cubit<ProgressState> {
   final WsClient _ws;
   final JobConfig config;
+  final String _clientReqId;
   StreamSubscription? _sub;
 
   ProgressCubit(this._ws, this.config, {required String clientReqId})
-      : super(const ProgressState()) {
+    : _clientReqId = clientReqId,
+      super(
+        ProgressState(
+          isReconnecting: _ws.isReconnecting,
+          reconnectAttempt: _ws.reconnectAttempt,
+          reconnectDelaySeconds: _ws.reconnectDelaySeconds,
+          reconnectRemainingSeconds: _ws.reconnectRemainingSeconds,
+        ),
+      ) {
     _sub = _ws.events.listen(_onEvent);
     _ws.submitJob(clientReqId: clientReqId, payload: config.toSubmitPayload());
   }
 
   void _onEvent(WsEvent event) {
     switch (event) {
+      case WsConnected():
+        emit(state.copyWith(isReconnecting: false));
+      case WsHelloReceived():
+        emit(state.copyWith(isReconnecting: false));
+      case WsReconnectScheduled(
+        :final attempt,
+        :final delaySeconds,
+        :final remainingSeconds,
+      ):
+        emit(
+          state.copyWith(
+            isReconnecting: true,
+            reconnectAttempt: attempt,
+            reconnectDelaySeconds: delaySeconds,
+            reconnectRemainingSeconds: remainingSeconds,
+          ),
+        );
+      case WsReconnectTick(
+        :final attempt,
+        :final delaySeconds,
+        :final remainingSeconds,
+      ):
+        emit(
+          state.copyWith(
+            isReconnecting: true,
+            reconnectAttempt: attempt,
+            reconnectDelaySeconds: delaySeconds,
+            reconnectRemainingSeconds: remainingSeconds,
+          ),
+        );
       case WsJobAccepted(:final data):
-        emit(state.copyWith(
-          jobId: data.jobId,
-          phase: JobPhase.queued,
-          queuePosition: data.queue?.position,
-          queueEtaMs: data.queue?.etaMs,
-        ));
+        emit(
+          state.copyWith(
+            jobId: data.jobId,
+            phase: JobPhase.queued,
+            queuePosition: data.queue?.position,
+            queueEtaMs: data.queue?.etaMs,
+          ),
+        );
       case WsJobQueued(:final data):
-        emit(state.copyWith(
-          queuePosition: data.queue.position,
-          queueEtaMs: data.queue.etaMs,
-        ));
+        emit(
+          state.copyWith(
+            queuePosition: data.queue.position,
+            queueEtaMs: data.queue.etaMs,
+          ),
+        );
       case WsJobStarted(:final data):
-        emit(state.copyWith(
-          jobId: data.jobId,
-          phase: JobPhase.started,
-        ));
+        emit(state.copyWith(jobId: data.jobId, phase: JobPhase.started));
       case WsJobProgress(:final data):
         final newHistory = List<double>.from(state.historyBestF);
         if (data.progress.historyBestFTail != null) {
@@ -127,23 +206,27 @@ class ProgressCubit extends Cubit<ProgressState> {
         if (data.progress.bestX != null) {
           newHistoryX.add(List<double>.from(data.progress.bestX!));
         }
-        emit(state.copyWith(
-          phase: JobPhase.running,
-          iteration: data.progress.iteration,
-          maxIterations: data.progress.maxIterations,
-          bestF: data.progress.bestF,
-          bestX: data.progress.bestX,
-          historyBestF: newHistory,
-          historyBestX: newHistoryX,
-          elapsedMs: data.progress.elapsedMs,
-        ));
+        emit(
+          state.copyWith(
+            phase: JobPhase.running,
+            iteration: data.progress.iteration,
+            maxIterations: data.progress.maxIterations,
+            bestF: data.progress.bestF,
+            bestX: data.progress.bestX,
+            historyBestF: newHistory,
+            historyBestX: newHistoryX,
+            elapsedMs: data.progress.elapsedMs,
+          ),
+        );
       case WsJobResult(:final data):
-        emit(state.copyWith(
-          result: data,
-          bestF: data.result.bestF,
-          bestX: data.result.bestX,
-          historyBestF: data.result.historyBestF,
-        ));
+        emit(
+          state.copyWith(
+            result: data,
+            bestF: data.result.bestF,
+            bestX: data.result.bestX,
+            historyBestF: data.result.historyBestF,
+          ),
+        );
       case WsJobFinished(:final data):
         final phase = switch (data.finalState) {
           'succeeded' => JobPhase.succeeded,
@@ -154,10 +237,9 @@ class ProgressCubit extends Cubit<ProgressState> {
         };
         emit(state.copyWith(phase: phase));
       case WsError(:final error):
-        emit(state.copyWith(
-          phase: JobPhase.failed,
-          errorMessage: error.message,
-        ));
+        emit(
+          state.copyWith(phase: JobPhase.failed, errorMessage: error.message),
+        );
       default:
         break;
     }
@@ -166,10 +248,13 @@ class ProgressCubit extends Cubit<ProgressState> {
   void cancelJob() {
     final jobId = state.jobId;
     if (jobId == null) {
-      emit(state.copyWith(
-        phase: JobPhase.cancelled,
-        errorMessage: 'Задача ещё не принята сервером',
-      ));
+      _ws.removePendingByClientReqId(_clientReqId);
+      emit(
+        state.copyWith(
+          phase: JobPhase.cancelled,
+          errorMessage: 'Задача ещё не принята сервером',
+        ),
+      );
       return;
     }
     _ws.cancelJob(jobId, 'cancel-$jobId');
