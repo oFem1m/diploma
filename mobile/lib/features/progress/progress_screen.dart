@@ -124,7 +124,7 @@ class ProgressScreen extends StatelessWidget {
                                 const SizedBox(height: 8),
                                 Expanded(
                                   child: ConvergenceLiveChart(
-                                    values: state.historyBestF,
+                                    values: state.liveHistoryBestF,
                                   ),
                                 ),
                               ],

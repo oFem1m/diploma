@@ -25,6 +25,7 @@ class ProgressState extends Equatable {
   final double? bestF;
   final List<double>? bestX;
   final List<double> historyBestF;
+  final List<double?> liveHistoryBestF;
   final List<List<double>> historyBestX;
   final int elapsedMs;
   final int? queuePosition;
@@ -44,6 +45,7 @@ class ProgressState extends Equatable {
     this.bestF,
     this.bestX,
     this.historyBestF = const [],
+    this.liveHistoryBestF = const [],
     this.historyBestX = const [],
     this.elapsedMs = 0,
     this.queuePosition,
@@ -64,6 +66,7 @@ class ProgressState extends Equatable {
     double? bestF,
     List<double>? bestX,
     List<double>? historyBestF,
+    List<double?>? liveHistoryBestF,
     List<List<double>>? historyBestX,
     int? elapsedMs,
     int? queuePosition,
@@ -83,6 +86,7 @@ class ProgressState extends Equatable {
       bestF: bestF ?? this.bestF,
       bestX: bestX ?? this.bestX,
       historyBestF: historyBestF ?? this.historyBestF,
+      liveHistoryBestF: liveHistoryBestF ?? this.liveHistoryBestF,
       historyBestX: historyBestX ?? this.historyBestX,
       elapsedMs: elapsedMs ?? this.elapsedMs,
       queuePosition: queuePosition ?? this.queuePosition,
@@ -108,6 +112,7 @@ class ProgressState extends Equatable {
     maxIterations,
     bestF,
     historyBestF.length,
+    liveHistoryBestF.length,
     historyBestX.length,
     elapsedMs,
     queuePosition,
@@ -125,6 +130,7 @@ class ProgressCubit extends Cubit<ProgressState> {
   final JobConfig config;
   final String _clientReqId;
   StreamSubscription? _sub;
+  bool _hadConnectionGap = false;
 
   ProgressCubit(this._ws, this.config, {required String clientReqId})
     : _clientReqId = clientReqId,
@@ -155,6 +161,7 @@ class ProgressCubit extends Cubit<ProgressState> {
         :final delaySeconds,
         :final remainingSeconds,
       ):
+        _hadConnectionGap = true;
         emit(
           state.copyWith(
             isReconnecting: true,
@@ -235,16 +242,37 @@ class ProgressCubit extends Cubit<ProgressState> {
     ProgressData progress, {
     JobPhase phase = JobPhase.running,
   }) {
+    final previousIteration = state.iteration;
     final newHistory = List<double>.from(state.historyBestF);
+    final newLiveHistory = List<double?>.from(state.liveHistoryBestF);
     if (progress.historyBestFTail != null) {
-      for (final v in progress.historyBestFTail!) {
-        if (newHistory.isEmpty || newHistory.last != v) {
-          newHistory.add(v);
+      final tail = progress.historyBestFTail!;
+      final tailStartIteration = progress.iteration - tail.length + 1;
+      if (_hadConnectionGap && state.iteration > 0) {
+        final missedPoints = tailStartIteration - previousIteration - 1;
+        if (missedPoints > 0) {
+          newLiveHistory.addAll(List<double?>.filled(missedPoints, null));
         }
       }
-    } else if (newHistory.isEmpty || newHistory.last != progress.bestF) {
+      for (var i = 0; i < tail.length; i++) {
+        final iteration = tailStartIteration + i;
+        if (newHistory.isEmpty || iteration > previousIteration) {
+          final v = tail[i];
+          newHistory.add(v);
+          newLiveHistory.add(v);
+        }
+      }
+    } else if (newHistory.isEmpty || progress.iteration > previousIteration) {
+      if (_hadConnectionGap && state.iteration > 0) {
+        final missedPoints = progress.iteration - previousIteration - 1;
+        if (missedPoints > 0) {
+          newLiveHistory.addAll(List<double?>.filled(missedPoints, null));
+        }
+      }
       newHistory.add(progress.bestF);
+      newLiveHistory.add(progress.bestF);
     }
+    _hadConnectionGap = false;
     final newHistoryX = List<List<double>>.from(state.historyBestX);
     if (progress.bestX != null) {
       newHistoryX.add(List<double>.from(progress.bestX!));
@@ -257,6 +285,7 @@ class ProgressCubit extends Cubit<ProgressState> {
         bestF: progress.bestF,
         bestX: progress.bestX,
         historyBestF: newHistory,
+        liveHistoryBestF: newLiveHistory,
         historyBestX: newHistoryX,
         elapsedMs: progress.elapsedMs,
       ),
