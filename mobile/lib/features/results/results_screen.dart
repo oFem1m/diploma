@@ -297,6 +297,10 @@ class _ResultsScreenState extends State<ResultsScreen> {
                 ],
               ),
             ],
+            if (r.finalFitness != null && r.finalFitness!.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _FinalFitnessTile(fitness: r.finalFitness!),
+            ],
             const SizedBox(height: 24),
             Row(
               children: [
@@ -432,6 +436,56 @@ class _ResultsScreenState extends State<ResultsScreen> {
       return bounds.items![axis][1];
     }
     return bounds.high;
+  }
+}
+
+class _FinalFitnessTile extends StatelessWidget {
+  final List<double> fitness;
+
+  const _FinalFitnessTile({required this.fitness});
+
+  @override
+  Widget build(BuildContext context) {
+    final minValue = fitness.reduce((a, b) => a < b ? a : b);
+    final maxValue = fitness.reduce((a, b) => a > b ? a : b);
+    final meanValue = fitness.reduce((a, b) => a + b) / fitness.length;
+
+    return ExpansionTile(
+      title: const Text('Финальный fitness'),
+      subtitle: Text(
+        'min ${formatBestF(minValue, maxPlainLength: 12)} | '
+        'avg ${formatBestF(meanValue, maxPlainLength: 12)} | '
+        'max ${formatBestF(maxValue, maxPlainLength: 12)}',
+      ),
+      children: [
+        SizedBox(
+          height: 200,
+          child: ListView.builder(
+            itemCount: fitness.length,
+            itemBuilder: (_, i) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 48,
+                    child: Text(
+                      '#$i',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      formatBestF(fitness[i]),
+                      style: const TextStyle(fontFamily: 'monospace'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }
 

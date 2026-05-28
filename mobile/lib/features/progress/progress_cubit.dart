@@ -26,6 +26,7 @@ class ProgressState extends Equatable {
   final List<double>? bestX;
   final List<double> historyBestF;
   final List<double?> liveHistoryBestF;
+  final List<double>? fitness;
   final List<List<double>> historyBestX;
   final int elapsedMs;
   final int? queuePosition;
@@ -46,6 +47,7 @@ class ProgressState extends Equatable {
     this.bestX,
     this.historyBestF = const [],
     this.liveHistoryBestF = const [],
+    this.fitness,
     this.historyBestX = const [],
     this.elapsedMs = 0,
     this.queuePosition,
@@ -67,6 +69,7 @@ class ProgressState extends Equatable {
     List<double>? bestX,
     List<double>? historyBestF,
     List<double?>? liveHistoryBestF,
+    List<double>? fitness,
     List<List<double>>? historyBestX,
     int? elapsedMs,
     int? queuePosition,
@@ -87,6 +90,7 @@ class ProgressState extends Equatable {
       bestX: bestX ?? this.bestX,
       historyBestF: historyBestF ?? this.historyBestF,
       liveHistoryBestF: liveHistoryBestF ?? this.liveHistoryBestF,
+      fitness: fitness ?? this.fitness,
       historyBestX: historyBestX ?? this.historyBestX,
       elapsedMs: elapsedMs ?? this.elapsedMs,
       queuePosition: queuePosition ?? this.queuePosition,
@@ -113,6 +117,7 @@ class ProgressState extends Equatable {
     bestF,
     historyBestF.length,
     liveHistoryBestF.length,
+    fitness,
     historyBestX.length,
     elapsedMs,
     queuePosition,
@@ -202,7 +207,7 @@ class ProgressCubit extends Cubit<ProgressState> {
       case WsJobStarted(:final data):
         emit(state.copyWith(jobId: data.jobId, phase: JobPhase.started));
       case WsJobProgress(:final data):
-        _emitProgress(data.progress);
+        _emitProgress(data.progress, snapshots: data.snapshots);
       case WsJobResult(:final data):
         emit(
           state.copyWith(
@@ -241,6 +246,7 @@ class ProgressCubit extends Cubit<ProgressState> {
   void _emitProgress(
     ProgressData progress, {
     JobPhase phase = JobPhase.running,
+    ProgressSnapshots? snapshots,
   }) {
     final previousIteration = state.iteration;
     final newHistory = List<double>.from(state.historyBestF);
@@ -273,11 +279,12 @@ class ProgressCubit extends Cubit<ProgressState> {
       newHistory.add(progress.bestF!);
       newLiveHistory.add(progress.bestF!);
     }
-    _hadConnectionGap = false;
+    final fitness = snapshots?.fitness;
     final newHistoryX = List<List<double>>.from(state.historyBestX);
     if (progress.bestX != null) {
       newHistoryX.add(List<double>.from(progress.bestX!));
     }
+    _hadConnectionGap = false;
     emit(
       state.copyWith(
         phase: phase,
@@ -287,6 +294,7 @@ class ProgressCubit extends Cubit<ProgressState> {
         bestX: progress.bestX,
         historyBestF: newHistory,
         liveHistoryBestF: newLiveHistory,
+        fitness: fitness,
         historyBestX: newHistoryX,
         elapsedMs: progress.elapsedMs,
       ),

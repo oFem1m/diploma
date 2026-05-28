@@ -109,6 +109,7 @@ class PSO:
             "best_f": float(gbest_fit),
             "history_best_f": history_best,
             "final_positions": X.copy(),
+            "final_fitness": fit.copy(),
             "final_velocities": V.copy(),
         }
 

@@ -133,6 +133,8 @@ class ProgressScreen extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (state.fitness != null && state.fitness!.isNotEmpty)
+                        _FitnessSummary(fitness: state.fitness!),
                       if (state.bestX != null && state.bestX!.isNotEmpty) ...[
                         const SizedBox(height: 8),
                         SizedBox(
@@ -237,6 +239,67 @@ class ProgressScreen extends StatelessWidget {
               capabilities: capabilities,
               historyBestX: historyBestX,
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FitnessSummary extends StatelessWidget {
+  final List<double> fitness;
+
+  const _FitnessSummary({required this.fitness});
+
+  @override
+  Widget build(BuildContext context) {
+    final minValue = fitness.reduce((a, b) => a < b ? a : b);
+    final maxValue = fitness.reduce((a, b) => a > b ? a : b);
+    final meanValue = fitness.reduce((a, b) => a + b) / fitness.length;
+    final visibleCount = fitness.length > 50 ? 50 : fitness.length;
+
+    return SizedBox(
+      height: 116,
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    'Fitness',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'min ${formatBestF(minValue, maxPlainLength: 10)}  '
+                      'avg ${formatBestF(meanValue, maxPlainLength: 10)}  '
+                      'max ${formatBestF(maxValue, maxPlainLength: 10)}',
+                      textAlign: TextAlign.end,
+                      style: Theme.of(context).textTheme.bodySmall,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: visibleCount,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, i) => Chip(
+                    label: Text(
+                      formatBestF(fitness[i], maxPlainLength: 10),
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
