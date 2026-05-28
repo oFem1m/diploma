@@ -4,30 +4,25 @@ import 'color_maps.dart';
 
 typedef TestFunction3D = double Function(List<double> x);
 
-/// A face (quad) of the 3D surface mesh, used for painter's algorithm.
 class _Face {
-  final Offset a, b, c, d; // projected screen coords
-  final double depth; // average z for sorting
+  final Offset a, b, c, d;
+  final double depth;
   final Color color;
 
   _Face(this.a, this.b, this.c, this.d, this.depth, this.color);
 }
 
-/// Custom painter that renders a 3D surface plot of a test function
-/// with perspective projection and painter's-algorithm depth sorting.
 class Surface3DPainter extends CustomPainter {
   final TestFunction3D function;
   final double xMin, xMax, yMin, yMax;
   final int resolution;
-  final double rotX; // rotation around X axis (pitch), radians
-  final double rotZ; // rotation around Z axis (yaw), radians
+  final double rotX;
+  final double rotZ;
   final int dimX;
   final int dimY;
 
-  /// Path of best solutions: list of coordinate vectors
   final List<List<double>>? historyBestX;
 
-  /// The final best solution
   final List<double>? bestPoint;
 
   Surface3DPainter({
@@ -53,7 +48,6 @@ class Surface3DPainter extends CustomPainter {
     final cy = sh / 2;
     final scale = min(sw, sh) * 0.38;
 
-    // 1. Compute grid values
     final n = resolution;
     final grid = List.generate(n + 1, (_) => List<double>.filled(n + 1, 0.0));
     double fMin = double.infinity;
@@ -74,23 +68,18 @@ class Surface3DPainter extends CustomPainter {
     final fRange = fMax - fMin;
     if (fRange == 0) return;
 
-    // Precompute trig
     final cosX = cos(rotX), sinX = sin(rotX);
     final cosZ = cos(rotZ), sinZ = sin(rotZ);
 
-    // 3D→2D projection (orthographic with rotation)
     Offset project(double px, double py, double pz) {
-      // Normalize to [-1, 1]
       final nx = 2 * (px - xMin) / (xMax - xMin) - 1;
       final ny = 2 * (py - yMin) / (yMax - yMin) - 1;
       final nz = 2 * (pz - fMin) / fRange - 1;
 
-      // Rotate around Z axis
       final rx = nx * cosZ - ny * sinZ;
       final ry = nx * sinZ + ny * cosZ;
       final rz = nz;
 
-      // Rotate around X axis
       final ry2 = ry * cosX - rz * sinX;
 
       return Offset(cx + rx * scale, cy - ry2 * scale);
@@ -106,7 +95,6 @@ class Surface3DPainter extends CustomPainter {
       return ry * sinX + nz * cosX;
     }
 
-    // 2. Build faces
     final faces = <_Face>[];
 
     for (int i = 0; i < n; i++) {
@@ -138,10 +126,8 @@ class Surface3DPainter extends CustomPainter {
       }
     }
 
-    // 3. Sort back-to-front
     faces.sort((a, b) => a.depth.compareTo(b.depth));
 
-    // 4. Draw faces
     final paint = Paint()..style = PaintingStyle.fill;
     final edgePaint = Paint()
       ..style = PaintingStyle.stroke
@@ -161,10 +147,8 @@ class Surface3DPainter extends CustomPainter {
       canvas.drawPath(path, edgePaint);
     }
 
-    // 5. Draw axes labels
     _drawAxes(canvas, size, project, cx, cy, scale);
 
-    // 6. Draw best-X path (red dots connected by lines)
     if (historyBestX != null && historyBestX!.isNotEmpty) {
       final pathPaint = Paint()
         ..color = Colors.red.withValues(alpha: 0.9)
@@ -175,7 +159,6 @@ class Surface3DPainter extends CustomPainter {
         ..color = Colors.red
         ..style = PaintingStyle.fill;
 
-      // Sample path so we don't draw thousands of dots
       final path = _samplePath(historyBestX!, 60);
 
       Offset? prev;
@@ -195,7 +178,6 @@ class Surface3DPainter extends CustomPainter {
       }
     }
 
-    // 7. Draw final best point (star)
     if (bestPoint != null && bestPoint!.length > max(dimX, dimY)) {
       final bx = bestPoint![dimX];
       final by = bestPoint![dimY];
@@ -208,10 +190,8 @@ class Surface3DPainter extends CustomPainter {
   }
 
   List<double> _makePoint(double xVal, double yVal) {
-    // For multi-dim functions, create a zero-vector and set dimX/dimY
     final dims = max(dimX, dimY) + 1;
     final point = List<double>.filled(max(dims, 2), 0.0);
-    // If bestPoint exists, use its values as base (for projection)
     if (bestPoint != null) {
       for (int i = 0; i < min(bestPoint!.length, point.length); i++) {
         point[i] = bestPoint![i];
@@ -238,7 +218,6 @@ class Surface3DPainter extends CustomPainter {
       double cx, double cy, double scale) {
     final tp = TextPainter(textDirection: TextDirection.ltr);
 
-    // Draw axis labels near corners
     void drawLabel(String text, Offset pos) {
       tp.text = TextSpan(
         text: text,
@@ -248,11 +227,9 @@ class Surface3DPainter extends CustomPainter {
       tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
     }
 
-    // X axis endpoint
     final xEnd = project(xMax, yMin, 0);
     drawLabel('x$dimX', Offset(xEnd.dx, xEnd.dy + 14));
 
-    // Y axis endpoint
     final yEnd = project(xMin, yMax, 0);
     drawLabel('x$dimY', Offset(yEnd.dx - 14, yEnd.dy));
   }
