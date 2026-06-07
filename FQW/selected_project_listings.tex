@@ -1,0 +1,2762 @@
+% =====================================================================
+%  Подключение в основном документе:
+%    \input{selected_project_listings.tex}
+% =====================================================================
+
+% Листинг 01: server/main.py
+\begin{lstlisting}[language=Python, caption={Точка входа серверного приложения и подключение WebSocket-маршрута (server/main.py)}, label={lst:main-py}]
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+import os
+from contextlib import asynccontextmanager
+
+sys.path.insert(0, os.path.dirname(__file__))
+
+import uvicorn
+from fastapi import FastAPI, WebSocket
+
+from config import ServerConfig
+from task_queue.job_queue import JobQueue
+from task_queue.worker import Worker
+from ws_handler import ConnectionHandler
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+config = ServerConfig()
+job_queue = JobQueue(max_size=config.max_queue_size)
+workers: list[Worker] = []
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    worker_tasks = []
+    for i in range(config.max_workers):
+        w = Worker(worker_id=f"worker-{i+1}", job_queue=job_queue, config=config)
+        workers.append(w)
+        worker_tasks.append(asyncio.create_task(w.start()))
+    logger.info("started %d workers", len(workers))
+    yield
+    for w in workers:
+        w.stop()
+    for t in worker_tasks:
+        t.cancel()
+    logger.info("workers stopped")
+
+
+app = FastAPI(title="Optimization Server", version="0.1.0", lifespan=lifespan)
+
+
+@app.websocket("/ws/optimize")
+async def websocket_endpoint(ws: WebSocket):
+    handler = ConnectionHandler(ws, job_queue, config)
+    await handler.handle()
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "workers": len(workers),
+        "queue_size": len(job_queue.get_queued_jobs()),
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host=config.host,
+        port=config.port,
+        log_level="info",
+        ws_ping_interval=None,
+    )
+\end{lstlisting}
+
+
+% Листинг 02: server/ws_handler.py
+\begin{lstlisting}[language=Python, caption={Обработка WebSocket-соединения, команд клиента и передачи прогресса (server/ws\_handler.py)}, label={lst:ws-handler-py}]
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timezone
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+from config import ServerConfig
+from protocol.envelope import build_envelope, parse_envelope
+from protocol.types import (
+    HelloClientPayload,
+    JobSubmitPayload,
+    CancelPayload,
+    JobStatusGetPayload,
+)
+from protocol.validation import validate_job_submit, SUPPORTED_METHODS, SUPPORTED_BUILTINS
+from task_queue.job import Job
+from task_queue.job_queue import JobQueue, QueueOverflowError
+
+logger = logging.getLogger(__name__)
+
+
+class ConnectionHandler:
+    def __init__(self, ws: WebSocket, job_queue: JobQueue, config: ServerConfig):
+        self.ws = ws
+        self.job_queue = job_queue
+        self.config = config
+        self._active_jobs: set[str] = set()
+        self._ping_task = None
+        self._send_lock = asyncio.Lock()
+
+    async def handle(self):
+        await self.ws.accept()
+        logger.info("client connected")
+
+        try:
+            if not await self._wait_hello():
+                return
+            self._ping_task = asyncio.ensure_future(self._ping_loop())
+            await self._message_loop()
+        except WebSocketDisconnect:
+            logger.info("client disconnected")
+        except Exception:
+            logger.exception("connection error")
+        finally:
+            if self._ping_task:
+                self._ping_task.cancel()
+            for job_id in self._active_jobs:
+                self.job_queue.detach_ws_later(
+                    job_id,
+                    self.ws,
+                    self.config.reconnect_grace_s,
+                )
+
+    async def _wait_hello(self):
+        raw = await self.ws.receive_text()
+        envelope = parse_envelope(raw)
+
+        if envelope.header.type != "hello":
+            await self._send_error(
+                "BAD_REQUEST",
+                "first message must be hello",
+                reply_to=envelope.header.msg_id,
+            )
+            await self.ws.close()
+            return False
+
+        capabilities = {
+            "methods": list(SUPPORTED_METHODS),
+            "objective_kinds": ["builtin", "expression"],
+            "progress_modes": ["per_generation", "every_k", "none"],
+            "max_payload_bytes": self.config.limits.max_payload_bytes,
+        }
+
+        await self._send("hello", {
+            "server": {"name": "optimizer-server", "version": "0.1.0"},
+            "capabilities": capabilities,
+        }, reply_to=envelope.header.msg_id)
+        return True
+
+    async def _message_loop(self):
+        while True:
+            raw = await self.ws.receive_text()
+            try:
+                envelope = parse_envelope(raw)
+            except Exception as e:
+                await self._send_error("BAD_REQUEST", f"invalid message: {e}")
+                continue
+
+            msg_type = envelope.header.type
+            handlers = {
+                "job.submit": self._handle_submit,
+                "cancel": self._handle_cancel,
+                "job.status.get": self._handle_status_get,
+                "ping": self._handle_ping,
+                "pong": self._handle_pong,
+            }
+
+            handler = handlers.get(msg_type)
+            if handler:
+                await handler(envelope)
+            else:
+                await self._send_error(
+                    "BAD_REQUEST",
+                    f"unknown message type: {msg_type}",
+                    reply_to=envelope.header.msg_id,
+                )
+
+    async def _handle_submit(self, envelope):
+        try:
+            payload = JobSubmitPayload.model_validate(envelope.payload)
+        except Exception as e:
+            await self._send_error(
+                "VALIDATION_ERROR",
+                f"invalid payload: {e}",
+                reply_to=envelope.header.msg_id,
+            )
+            return
+
+        errors = validate_job_submit(payload, self.config.limits)
+        if errors:
+            await self._send_error(
+                "VALIDATION_ERROR",
+                "; ".join(errors),
+                reply_to=envelope.header.msg_id,
+            )
+            return
+
+        client_req_id = envelope.header.trace.client_req_id or envelope.header.msg_id
+        priority = payload.job.priority.value if hasattr(payload.job.priority, "value") else payload.job.priority
+
+        try:
+            job, is_new = await self.job_queue.submit(
+                payload=payload.model_dump(),
+                client_req_id=client_req_id,
+                priority=priority,
+                ws=self.ws,
+                ws_send_lock=self._send_lock,
+            )
+        except QueueOverflowError:
+            await self._send_error(
+                "QUEUE_OVERFLOW",
+                "job queue is full, try again later",
+                reply_to=envelope.header.msg_id,
+                retryable=True,
+            )
+            return
+
+        self._active_jobs.add(job.job_id)
+
+        position, eta_ms = self.job_queue.get_queue_position(job.job_id)
+        trace = {
+            "client_req_id": client_req_id,
+            "job_id": job.job_id,
+            "span_id": None,
+        }
+        await self._send("job.accepted", {
+            "job_id": job.job_id,
+            "state": "queued",
+            "queue": {"position": position, "eta_ms": eta_ms},
+        }, reply_to=envelope.header.msg_id, trace=trace)
+
+    async def _handle_cancel(self, envelope):
+        try:
+            payload = CancelPayload.model_validate(envelope.payload)
+        except Exception as e:
+            await self._send_error("BAD_REQUEST", str(e), reply_to=envelope.header.msg_id)
+            return
+
+        job = self.job_queue.get_job(payload.job_id)
+        if not job:
+            await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        was_queued = job.state.value == "queued"
+        success = self.job_queue.cancel(payload.job_id)
+        if not success:
+            await self._send_error("JOB_ALREADY_FINISHED",
+                                   f"job {payload.job_id} already in state {job.state.value}",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        if was_queued:
+            trace = {
+                "client_req_id": job.client_req_id,
+                "job_id": job.job_id,
+                "span_id": None,
+            }
+            await self._send("job.finished", {
+                "job_id": job.job_id,
+                "final_state": "cancelled",
+                "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            }, reply_to=envelope.header.msg_id, trace=trace)
+
+    async def _handle_status_get(self, envelope):
+        try:
+            payload = JobStatusGetPayload.model_validate(envelope.payload)
+        except Exception as e:
+            await self._send_error("BAD_REQUEST", str(e), reply_to=envelope.header.msg_id)
+            return
+
+        job = self.job_queue.get_job(payload.job_id)
+        if not job:
+            await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        client_req_id = envelope.header.trace.client_req_id
+        if client_req_id and client_req_id != job.client_req_id:
+            await self._send_error("JOB_NOT_FOUND", f"job {payload.job_id} not found",
+                                   reply_to=envelope.header.msg_id)
+            return
+
+        if not job.is_terminal:
+            self.job_queue.attach_ws(job.job_id, self.ws, self._send_lock)
+            self._active_jobs.add(job.job_id)
+
+        status_payload = {
+            "job_id": job.job_id,
+            "state": job.state.value,
+            "queue": None,
+            "progress": job.last_progress,
+        }
+
+        if job.state.value == "queued":
+            pos, eta = self.job_queue.get_queue_position(job.job_id)
+            status_payload["queue"] = {"position": pos, "eta_ms": eta}
+
+        trace = {
+            "client_req_id": job.client_req_id,
+            "job_id": job.job_id,
+            "span_id": None,
+        }
+        await self._send("job.status", status_payload,
+                         reply_to=envelope.header.msg_id, trace=trace)
+        if job.is_terminal:
+            await self._send_terminal_snapshot(job, reply_to=envelope.header.msg_id, trace=trace)
+
+    async def _handle_ping(self, envelope):
+        await self._send("pong", {}, reply_to=envelope.header.msg_id)
+
+    async def _handle_pong(self, envelope):
+        return
+
+    async def _send_terminal_snapshot(self, job: Job, *, reply_to: str = None, trace: dict = None):
+        if job.state.value == "succeeded" and job.result:
+            history = job.result.get("history_best_f", [])
+            await self._send("job.result", {
+                "job_id": job.job_id,
+                "result": self._build_result_payload(job),
+                "metrics": {
+                    "method": job.result.get("method", "unknown"),
+                    "iterations": len(history),
+                    "evals": len(history),
+                    "wall_time_ms": job.result.get("wall_time_ms", 0),
+                    "seed": job.result.get("seed"),
+                },
+            }, reply_to=reply_to, trace=trace)
+        await self._send("job.finished", {
+            "job_id": job.job_id,
+            "final_state": job.state.value,
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        }, reply_to=reply_to, trace=trace)
+
+    def _build_result_payload(self, job: Job):
+        output = job.payload.get("output", {})
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+
+        result = job.result
+        payload = {
+            "best_x": result["best_x"],
+            "best_f": result["best_f"],
+            "history_best_f": result.get("history_best_f", []),
+        }
+        if output.get("return_final_population", True):
+            if result.get("final_population") is not None:
+                payload["final_population"] = result.get("final_population")
+            if result.get("final_positions") is not None:
+                payload["final_positions"] = result.get("final_positions")
+        if output.get("return_final_fitness", True) and result.get("final_fitness") is not None:
+            payload["final_fitness"] = result.get("final_fitness")
+        if output.get("return_final_velocities", False) and result.get("final_velocities") is not None:
+            payload["final_velocities"] = result.get("final_velocities")
+        return payload
+
+    async def _ping_loop(self):
+        try:
+            while True:
+                await asyncio.sleep(self.config.ping_interval_s)
+                await self._send("ping", {})
+        except asyncio.CancelledError:
+            pass
+
+    async def _send(self, msg_type: str, payload: dict, *,
+                    reply_to: str = None, trace: dict = None):
+        msg = build_envelope(msg_type, payload, reply_to=reply_to, trace=trace)
+        try:
+            async with self._send_lock:
+                await self.ws.send_text(json.dumps(msg, default=str))
+        except RuntimeError:
+            raise WebSocketDisconnect()
+
+    async def _send_error(self, code: str, message: str, *,
+                          reply_to: str = None, retryable: bool = False):
+        await self._send("error", {
+            "code": code,
+            "message": message,
+            "details": None,
+            "retryable": retryable,
+        }, reply_to=reply_to)
+\end{lstlisting}
+
+
+% Листинг 03: server/task_queue/worker.py
+\begin{lstlisting}[language=Python, caption={Фоновый исполнитель задач оптимизации и отправка промежуточных результатов (server/task\_queue/worker.py)}, label={lst:worker-py}]
+from __future__ import annotations
+
+import asyncio
+import logging
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from typing import Any, Dict
+
+from config import ServerConfig
+from optimizer.runner import run_optimization, CancelledError
+from protocol.envelope import build_envelope
+from task_queue.job import Job, JobState
+from task_queue.job_queue import JobQueue
+
+logger = logging.getLogger(__name__)
+
+
+class Worker:
+    def __init__(self, worker_id: str, job_queue: JobQueue, config: ServerConfig):
+        self.worker_id = worker_id
+        self.job_queue = job_queue
+        self.config = config
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"opt-{worker_id}")
+        self._running = False
+
+    async def start(self):
+        self._running = True
+        logger.info("worker %s started", self.worker_id)
+        while self._running:
+            try:
+                job = await self.job_queue.get_next()
+                if job.is_terminal:
+                    continue
+                await self._run_job(job)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("worker %s unexpected error", self.worker_id)
+                await asyncio.sleep(1)
+
+    def stop(self):
+        self._running = False
+        self._executor.shutdown(wait=False)
+
+    async def _run_job(self, job: Job):
+        job.mark_started()
+        await self._send(job, "job.started", {
+            "job_id": job.job_id,
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "worker": {"id": self.worker_id, "host": "localhost"},
+        })
+
+        loop = asyncio.get_event_loop()
+
+        def on_progress(data: Dict):
+            try:
+                loop.call_soon_threadsafe(job.progress_queue.put_nowait, data)
+            except Exception:
+                pass
+
+        progress_task = asyncio.ensure_future(self._stream_progress(job))
+
+        timeout_ms = job.payload.get("job", {})
+        if hasattr(timeout_ms, "timeout_ms"):
+            timeout_ms = timeout_ms.timeout_ms
+        elif isinstance(timeout_ms, dict):
+            timeout_ms = timeout_ms.get("timeout_ms")
+        timeout_s = (timeout_ms or self.config.default_timeout_ms) / 1000.0
+
+        try:
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    self._executor,
+                    run_optimization,
+                    self._serialize_payload(job.payload),
+                    on_progress,
+                    job.cancel_event,
+                ),
+                timeout=timeout_s,
+            )
+
+            job.progress_queue.put_nowait(None)
+            await progress_task
+
+            if job.state == JobState.CANCELLED:
+                await self._send_finished(job, "cancelled")
+                return
+
+            job.mark_succeeded(result)
+
+            max_gen = result.get("history_best_f", [])
+            iterations = len(max_gen)
+
+            await self._send(job, "job.result", {
+                "job_id": job.job_id,
+                "result": self._build_result_payload(job, result),
+                "metrics": {
+                    "method": result.get("method", "unknown"),
+                    "iterations": iterations,
+                    "evals": iterations,
+                    "wall_time_ms": result.get("wall_time_ms", 0),
+                    "seed": result.get("seed"),
+                },
+            })
+
+            await self._send_finished(job, "succeeded")
+
+        except asyncio.TimeoutError:
+            job.mark_timeout()
+            job.progress_queue.put_nowait(None)
+            await progress_task
+            await self._send_error(job, "TIMEOUT", "job exceeded timeout")
+            await self._send_finished(job, "timeout")
+
+        except CancelledError:
+            job.mark_cancelled()
+            job.progress_queue.put_nowait(None)
+            await progress_task
+            await self._send_finished(job, "cancelled")
+
+        except Exception as e:
+            job.mark_failed(str(e))
+            job.progress_queue.put_nowait(None)
+            await progress_task
+            logger.exception("job %s failed", job.job_id)
+            await self._send_error(job, "EXECUTION_ERROR", str(e))
+            await self._send_finished(job, "failed")
+
+    async def _stream_progress(self, job: Job):
+        streaming = job.payload.get("streaming", {})
+        if hasattr(streaming, "model_dump"):
+            streaming = streaming.model_dump()
+
+        mode = streaming.get("mode", "per_generation")
+        every_k = streaming.get("every_k", 1)
+        include = streaming.get("include", {})
+
+        if mode == "none":
+            while True:
+                data = await job.progress_queue.get()
+                if data is None:
+                    break
+            return
+
+        last_sent = -1
+        while True:
+            data = await job.progress_queue.get()
+            if data is None:
+                break
+
+            iteration = data.get("iteration", 0)
+            if mode == "every_k" and (iteration - last_sent) < every_k:
+                continue
+
+            last_sent = iteration
+            progress_payload = {
+                "job_id": job.job_id,
+                "progress": {
+                    "iteration": data["iteration"],
+                    "max_iterations": data["max_iterations"],
+                    "elapsed_ms": data.get("elapsed_ms", 0),
+                },
+                "snapshots": None,
+            }
+
+            if include.get("best_f", True):
+                progress_payload["progress"]["best_f"] = data["best_f"]
+                if data.get("history_best_f_tail"):
+                    progress_payload["progress"]["history_best_f_tail"] = data["history_best_f_tail"]
+            if include.get("best_x", True):
+                progress_payload["progress"]["best_x"] = data.get("best_x")
+            snapshots = {}
+            if include.get("population", False) and data.get("population") is not None:
+                snapshots["population"] = self._to_jsonable(data.get("population"))
+            if include.get("fitness", False) and data.get("fitness") is not None:
+                snapshots["fitness"] = self._to_jsonable(data.get("fitness"))
+            if include.get("velocities", False) and data.get("velocities") is not None:
+                snapshots["velocities"] = self._to_jsonable(data.get("velocities"))
+            if snapshots:
+                progress_payload["snapshots"] = snapshots
+
+            job.last_progress = progress_payload["progress"]
+            await self._send(job, "job.progress", progress_payload)
+
+    def _build_result_payload(self, job: Job, result: Dict[str, Any]) -> Dict[str, Any]:
+        output = job.payload.get("output", {})
+        if hasattr(output, "model_dump"):
+            output = output.model_dump()
+
+        result_payload = {
+            "best_x": result["best_x"],
+            "best_f": result["best_f"],
+            "history_best_f": result.get("history_best_f", []),
+        }
+        if output.get("return_final_population", True):
+            if result.get("final_population") is not None:
+                result_payload["final_population"] = result.get("final_population")
+            if result.get("final_positions") is not None:
+                result_payload["final_positions"] = result.get("final_positions")
+        if output.get("return_final_fitness", True) and result.get("final_fitness") is not None:
+            result_payload["final_fitness"] = result.get("final_fitness")
+        if output.get("return_final_velocities", False) and result.get("final_velocities") is not None:
+            result_payload["final_velocities"] = result.get("final_velocities")
+        return result_payload
+
+    def _to_jsonable(self, value):
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return value
+
+    async def _send_finished(self, job: Job, final_state: str):
+        await self._send(job, "job.finished", {
+            "job_id": job.job_id,
+            "final_state": final_state,
+            "finished_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        })
+
+    async def _send_error(self, job: Job, code: str, message: str):
+        await self._send(job, "error", {
+            "code": code,
+            "message": message,
+            "details": None,
+            "retryable": False,
+        })
+
+    async def _send(self, job: Job, msg_type: str, payload: Dict[str, Any]):
+        if not job.ws:
+            return
+        try:
+            trace = {
+                "client_req_id": job.client_req_id,
+                "job_id": job.job_id,
+                "span_id": None,
+            }
+            msg = build_envelope(msg_type, payload, trace=trace)
+            import json
+            if job.ws_send_lock:
+                async with job.ws_send_lock:
+                    await job.ws.send_text(json.dumps(msg, default=str))
+            else:
+                await job.ws.send_text(json.dumps(msg, default=str))
+        except Exception:
+            logger.debug("failed to send %s to job %s", msg_type, job.job_id)
+
+    def _serialize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        result = {}
+        for key, val in payload.items():
+            if hasattr(val, "model_dump"):
+                result[key] = val.model_dump()
+            else:
+                result[key] = val
+        return result
+\end{lstlisting}
+
+
+% Листинг 04: server/optimizer/runner.py
+\begin{lstlisting}[language=Python, caption={Единый адаптер запуска методов оптимизации (server/optimizer/runner.py)}, label={lst:runner-py}]
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any, Callable, Dict, Optional
+
+from optimizer.objectives import create_objective
+from optimizer.registry import create_algorithm
+
+
+class CancelledError(Exception):
+    pass
+
+
+def run_optimization(
+    submit_payload: Dict[str, Any],
+    on_progress: Optional[Callable[[Dict], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
+    objective_cfg = submit_payload["objective"]
+    if hasattr(objective_cfg, "model_dump"):
+        objective_cfg = objective_cfg.model_dump()
+
+    problem = submit_payload["problem"]
+    if hasattr(problem, "model_dump"):
+        problem = problem.model_dump()
+
+    method = submit_payload["method"]
+    if hasattr(method, "model_dump"):
+        method = method.model_dump()
+
+    dims = problem["dims"]
+    bounds_raw = problem["bounds"]
+    if bounds_raw.get("kind") == "uniform":
+        bounds = [(bounds_raw["low"], bounds_raw["high"])] * dims
+    else:
+        bounds = [(b[0], b[1]) for b in bounds_raw["items"]]
+
+    objective_fn = create_objective(objective_cfg, dims)
+
+    start_time = time.monotonic()
+
+    def progress_wrapper(data: Dict):
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("job cancelled")
+        if on_progress:
+            data["elapsed_ms"] = int((time.monotonic() - start_time) * 1000)
+            on_progress(data)
+
+    algo = create_algorithm(
+        method_name=method["name"],
+        config_dict=method.get("config", {}),
+        dims=dims,
+        bounds=bounds,
+        objective=objective_fn,
+        on_progress=progress_wrapper,
+    )
+
+    result = algo.optimize()
+
+    wall_time_ms = int((time.monotonic() - start_time) * 1000)
+
+    for key in ("best_x", "final_population", "final_fitness", "final_positions", "final_velocities"):
+        if key in result:
+            import numpy as np
+            val = result[key]
+            if isinstance(val, np.ndarray):
+                result[key] = val.tolist()
+
+    if isinstance(result.get("history_best_f"), list):
+        result["history_best_f"] = [float(x) for x in result["history_best_f"]]
+
+    result["wall_time_ms"] = wall_time_ms
+    result["method"] = method["name"]
+    result["seed"] = method.get("config", {}).get("random_seed")
+
+    return result
+\end{lstlisting}
+
+
+% Листинг 05: server/optimizer/registry.py
+\begin{lstlisting}[language=Python, caption={Реестр доступных методов оптимизации и фабрика оптимизаторов (server/optimizer/registry.py)}, label={lst:registry-py}]
+from __future__ import annotations
+
+import sys
+import os
+from typing import Any, Callable, Dict, Optional, Tuple, Type
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from BBO.BBO_classic.BBO_classic import ClassicBBO, BBOConfig as ClassicBBOConfig
+from BBO.BBO_classic.BBO_classic_modified import ClassicBBO_Modified, BBOConfigModified
+from BBO.BBO_sinusoidal.BBO_sinusoidal import BBO_Sinusoidal, BBOConfig as SinBBOConfig
+from BBO.BBO_sinusoidal.BBO_sinusoidal_modified import BBO_Sinusoidal_Modified, BBOConfigSinModified
+from BBO.BBO_mixed.BBO_mixed import BBO_Mixed, BBOConfig as MixedBBOConfig
+from BBO.BBO_mixed.BBO_mixed_modified import BBO_Mixed_Modified, BBOConfigMixedModified
+from BBO.PSO.PSO import PSO, PSOConfig
+
+METHODS: Dict[str, Tuple[Type, Type]] = {
+    "bbo.classic": (ClassicBBO, ClassicBBOConfig),
+    "bbo.classic.modified": (ClassicBBO_Modified, BBOConfigModified),
+    "bbo.sinusoidal": (BBO_Sinusoidal, SinBBOConfig),
+    "bbo.sinusoidal.modified": (BBO_Sinusoidal_Modified, BBOConfigSinModified),
+    "bbo.mixed": (BBO_Mixed, MixedBBOConfig),
+    "bbo.mixed.modified": (BBO_Mixed_Modified, BBOConfigMixedModified),
+    "pso": (PSO, PSOConfig),
+}
+
+
+def _build_config(config_cls: Type, config_dict: Dict[str, Any], dims: int, bounds: list) -> Any:
+    params = dict(config_dict)
+    params["dims"] = dims
+    params["bounds"] = bounds
+    return config_cls(**params)
+
+
+def create_algorithm(
+    method_name: str,
+    config_dict: Dict[str, Any],
+    dims: int,
+    bounds: list,
+    objective: Callable,
+    on_progress: Optional[Callable] = None,
+):
+    if method_name not in METHODS:
+        raise ValueError(f"unknown method: {method_name}")
+
+    algo_cls, config_cls = METHODS[method_name]
+    cfg = _build_config(config_cls, config_dict, dims, bounds)
+    return algo_cls(cfg, objective, on_progress=on_progress)
+\end{lstlisting}
+
+
+% Листинг 06: server/BBO/BBO_classic/BBO_classic_modified.py
+\begin{lstlisting}[language=Python, caption={Модифицированный алгоритм BBO с адаптивной мутацией, перезапуском и локальным поиском (server/BBO/BBO\_classic/BBO\_classic\_modified.py)}, label={lst:bbo-classic-modified-py}]
+"""
+Модифицированный классический BBO для задач минимизации.
+
+Особенности по сравнению с базовым ClassicBBO:
+- адаптивная мутация: от mutation_start к mutation_end по поколениям;
+- детектор стагнации: если долго нет улучшений, усиливается мутация
+и часть худших особей перегенерируется;
+- локальный поиск для лучших решений.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence, Tuple, Dict, Any, List
+
+import numpy as np
+
+
+@dataclass
+class BBOConfigModified:
+    pop_size: int = 50
+    dims: int = 10
+    bounds: Optional[Sequence[Tuple[float, float]]] = None
+    max_generations: int = 200
+
+    mutation_start: float = 0.05
+    mutation_end: float = 0.005
+
+    elite_count: int = 2
+    forbid_self_donation: bool = True
+
+    stagnation_generations: int = 25
+    restart_fraction: float = 0.3
+    mutation_boost_factor: float = 4.0
+
+    enable_local_search: bool = False
+    local_search_interval: int = 20
+    local_search_count: int = 2
+    local_search_steps: int = 20
+    local_search_step_start: float = 0.25
+    local_search_step_end: float = 0.02
+
+    random_seed: Optional[int] = None
+
+    def __post_init__(self):
+        assert self.pop_size >= 2
+        assert self.dims >= 1
+        if self.bounds is None:
+            self.bounds = [(-5.0, 5.0)] * self.dims
+        assert len(self.bounds) == self.dims
+        assert self.max_generations >= 1
+        assert 0.0 < self.mutation_end <= self.mutation_start <= 1.0
+        assert 0 <= self.elite_count < self.pop_size
+        assert self.stagnation_generations >= 1
+        assert 0.0 < self.restart_fraction < 1.0
+        assert self.mutation_boost_factor >= 1.0
+        if self.enable_local_search:
+            assert self.local_search_interval >= 1
+            assert self.local_search_count >= 1
+            assert self.local_search_steps >= 1
+            assert 0.0 < self.local_search_step_end <= self.local_search_step_start
+
+
+class ClassicBBO_Modified:
+    """Классический BBO с адаптивной мутацией и перезапусками."""
+
+    def __init__(self, config: BBOConfigModified, objective: Callable[[np.ndarray], float],
+                 on_progress: Optional[Callable] = None):
+        self.cfg = config
+        self.objective = objective
+        self.on_progress = on_progress
+        self.rng = np.random.default_rng(config.random_seed)
+
+        self.low = np.array([a for a, _ in self.cfg.bounds], dtype=float)
+        self.high = np.array([b for _, b in self.cfg.bounds], dtype=float)
+        self.span = self.high - self.low
+
+    def optimize(self) -> Dict[str, Any]:
+        N, d = self.cfg.pop_size, self.cfg.dims
+
+        X = self._init_population(N, d)
+        fit = self._evaluate(X)
+
+        best_idx = int(np.argmin(fit))
+        best_x = X[best_idx].copy()
+        best_f = float(fit[best_idx])
+
+        history_best: List[float] = [best_f]
+        stagnation = 0
+
+        for gen in range(self.cfg.max_generations):
+            mutation_rate = self._current_mutation_rate(gen)
+            if stagnation >= self.cfg.stagnation_generations:
+                X, fit = self._restart_partially(X, fit)
+                mutation_rate = min(
+                    self.cfg.mutation_start,
+                    mutation_rate * self.cfg.mutation_boost_factor,
+                )
+                stagnation = 0
+
+            X_new = self._migration_step(X, fit)
+            X_new = self._mutation_step(X_new, mutation_rate)
+            fit_new = self._evaluate(X_new)
+
+            X, fit = self._apply_elitism(X, fit, X_new, fit_new)
+
+            if self.cfg.enable_local_search and (gen + 1) % self.cfg.local_search_interval == 0:
+                X, fit = self._local_search(X, fit, gen)
+
+            cur_idx = int(np.argmin(fit))
+            cur_best_f = float(fit[cur_idx])
+
+            if cur_best_f < best_f:
+                best_f = cur_best_f
+                best_x = X[cur_idx].copy()
+                stagnation = 0
+            else:
+                stagnation += 1
+
+            history_best.append(best_f)
+
+            if self.on_progress:
+                self.on_progress({
+                    "iteration": gen,
+                    "max_iterations": self.cfg.max_generations,
+                    "best_f": best_f,
+                    "best_x": best_x.tolist(),
+                    "history_best_f_tail": history_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fit.copy(),
+                })
+
+        return {
+            "best_x": best_x,
+            "best_f": best_f,
+            "history_best_f": history_best,
+            "final_population": X,
+            "final_fitness": fit,
+        }
+
+    def _init_population(self, N: int, d: int) -> np.ndarray:
+        return self.low + self.rng.random((N, d)) * self.span
+
+    def _evaluate(self, X: np.ndarray) -> np.ndarray:
+        try:
+            vals = self.objective(X)
+            vals = np.asarray(vals, dtype=float)
+            if vals.shape == (X.shape[0],):
+                return vals
+        except Exception:
+            pass
+        return np.array([self.objective(ind) for ind in X], dtype=float)
+
+    def _current_mutation_rate(self, gen: int) -> float:
+        T = max(1, self.cfg.max_generations - 1)
+        alpha = min(1.0, max(0.0, gen / T))
+        return self.cfg.mutation_start + alpha * (self.cfg.mutation_end - self.cfg.mutation_start)
+
+    def _current_local_step(self, gen: int) -> float:
+        T = max(1, self.cfg.max_generations - 1)
+        alpha = min(1.0, max(0.0, gen / T))
+        return self.cfg.local_search_step_start + alpha * (self.cfg.local_search_step_end - self.cfg.local_search_step_start)
+
+    def _migration_step(self, X: np.ndarray, fit: np.ndarray) -> np.ndarray:
+        N, d = X.shape
+        idx = np.argsort(fit)
+        ranks = np.empty_like(idx)
+        ranks[idx] = np.arange(N)
+
+        imm_prob = ranks / max(1, N - 1)
+        emig_weight = (N - 1 - ranks).astype(float)
+        emig_weight /= max(1e-12, emig_weight.sum())
+
+        X_new = X.copy()
+
+        for i in range(N):
+            p_i = imm_prob[i]
+            if p_i <= 0.0:
+                continue
+            for k in range(d):
+                if self.rng.random() < p_i:
+                    donor = i
+                    if self.cfg.forbid_self_donation:
+                        for _ in range(5):
+                            donor = self.rng.choice(N, p=emig_weight)
+                            if donor != i:
+                                break
+                        if donor == i:
+                            continue
+                    else:
+                        donor = self.rng.choice(N, p=emig_weight)
+                    X_new[i, k] = X[donor, k]
+
+        return X_new
+
+    def _mutation_step(self, X: np.ndarray, mutation_rate: float) -> np.ndarray:
+        N, d = X.shape
+        mask = self.rng.random((N, d)) < mutation_rate
+        if not np.any(mask):
+            return X
+        noise = self.low + self.rng.random((N, d)) * self.span
+        X_mut = X.copy()
+        X_mut[mask] = noise[mask]
+        return X_mut
+
+    def _local_search(self, X: np.ndarray, fit: np.ndarray, gen: int) -> Tuple[np.ndarray, np.ndarray]:
+        N, d = X.shape
+        k = min(self.cfg.local_search_count, N)
+        if k <= 0 or self.cfg.local_search_steps <= 0:
+            return X, fit
+
+        step_frac = self._current_local_step(gen)
+
+        idx_sorted = np.argsort(fit)
+        target_idx = idx_sorted[:k]
+
+        X_loc = X.copy()
+        fit_loc = fit.copy()
+
+        for idx in target_idx:
+            x = X_loc[idx].copy()
+            f = float(fit_loc[idx])
+
+            for _ in range(self.cfg.local_search_steps):
+                noise = self.rng.normal(loc=0.0, scale=1.0, size=d) * (step_frac * self.span)
+                cand = x + noise
+                cand = np.clip(cand, self.low, self.high)
+
+                f_cand = float(self._evaluate(cand.reshape(1, -1))[0])
+                if f_cand < f:
+                    x = cand
+                    f = f_cand
+
+            X_loc[idx] = x
+            fit_loc[idx] = f
+
+        return X_loc, fit_loc
+
+    def _apply_elitism(
+        self,
+        X_old: np.ndarray,
+        fit_old: np.ndarray,
+        X_new: np.ndarray,
+        fit_new: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if self.cfg.elite_count <= 0:
+            return X_new, fit_new
+
+        N = X_old.shape[0]
+        elite_count = min(self.cfg.elite_count, N)
+
+        elite_idx = np.argsort(fit_old)[:elite_count]
+        worst_idx_new = np.argsort(fit_new)[-elite_count:]
+
+        X_res = X_new.copy()
+        fit_res = fit_new.copy()
+
+        X_res[worst_idx_new] = X_old[elite_idx]
+        fit_res[worst_idx_new] = fit_old[elite_idx]
+
+        return X_res, fit_res
+
+    def _restart_partially(self, X: np.ndarray, fit: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        N, d = X.shape
+        n_restart = int(max(1, round(self.cfg.restart_fraction * N)))
+        max_replace = max(1, N - self.cfg.elite_count)
+        n_restart = min(n_restart, max_replace)
+
+        worst_idx = np.argsort(fit)[-n_restart:]
+
+        X_new = X.copy()
+        X_new[worst_idx] = self._init_population(n_restart, d)
+        fit_new = self._evaluate(X_new)
+        return X_new, fit_new
+
+
+if __name__ == "__main__":
+    from test_functions import rastrigin
+
+    cfg = BBOConfigModified(
+        pop_size=50,
+        dims=10,
+        bounds=[(-5.12, 5.12)] * 10,
+        max_generations=100,
+        mutation_start=0.05,
+        mutation_end=0.005,
+        elite_count=2,
+        stagnation_generations=20,
+        restart_fraction=0.3,
+        random_seed=42,
+    )
+
+    algo = ClassicBBO_Modified(cfg, objective=rastrigin)
+    res = algo.optimize()
+    print("Best f:", res["best_f"])
+\end{lstlisting}
+
+
+% Листинг 07: server/BBO/PSO/PSO.py
+\begin{lstlisting}[language=Python, caption={Реализация метода роя частиц для сравнительных экспериментов (server/BBO/PSO/PSO.py)}, label={lst:pso-py}]
+"""
+Метод роя частиц PSO для задач минимизации
+
+Особенности реализации:
+- инерция w линейно уменьшается от w_start до w_end
+- когнитивная c1 и социальная c2 составляющие
+- ограничение скорости по модулю v_max = vmax_frac * диапазон
+- обработка границ позиций через обрезку clip
+- элитарность не используется, хранятся личные и глобальные лучшие
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Callable, Optional, Sequence, Tuple, Dict, Any
+import numpy as np
+
+
+@dataclass
+class PSOConfig:
+    swarm_size: int = 50
+    dims: int = 10
+    bounds: Optional[Sequence[Tuple[float, float]]] = None
+    max_generations: int = 200
+    w_start: float = 0.9
+    w_end: float = 0.4
+    c1: float = 2.0
+    c2: float = 2.0
+    vmax_frac: float = 0.2
+    random_seed: Optional[int] = None
+
+    def __post_init__(self):
+        assert self.swarm_size >= 2
+        if self.bounds is None:
+            self.bounds = [(-5.0, 5.0)] * self.dims
+        assert len(self.bounds) == self.dims
+        assert self.max_generations >= 1
+        assert self.vmax_frac > 0
+
+
+class PSO:
+    def __init__(self, config: PSOConfig, objective: Callable[[np.ndarray], float],
+                 on_progress: Optional[Callable] = None):
+        self.cfg = config
+        self.objective = objective
+        self.on_progress = on_progress
+        self.rng = np.random.default_rng(config.random_seed)
+        self.low = np.array([a for a, _ in self.cfg.bounds], dtype=float)
+        self.high = np.array([b for _, b in self.cfg.bounds], dtype=float)
+        self.span = self.high - self.low
+        self.vmax = self.cfg.vmax_frac * self.span
+
+    def optimize(self) -> Dict[str, Any]:
+        N, n = self.cfg.swarm_size, self.cfg.dims
+        X = self.low + self.rng.random((N, n)) * self.span
+        V = -self.vmax + self.rng.random((N, n)) * (2.0 * self.vmax)
+
+        fit = self._evaluate(X)
+        pbest_pos = X.copy()
+        pbest_fit = fit.copy()
+
+        g_idx = int(np.argmin(pbest_fit))
+        gbest_pos = pbest_pos[g_idx].copy()
+        gbest_fit = float(pbest_fit[g_idx])
+
+        history_best = [gbest_fit]
+
+        for t in range(self.cfg.max_generations):
+            w = self._inertia_weight(t)
+
+            r1 = self.rng.random((N, n))
+            r2 = self.rng.random((N, n))
+
+            cognitive = self.cfg.c1 * r1 * (pbest_pos - X)
+            social = self.cfg.c2 * r2 * (gbest_pos - X)
+            V = w * V + cognitive + social
+
+            V = np.clip(V, -self.vmax, self.vmax)
+
+            X = X + V
+
+            X = np.clip(X, self.low, self.high)
+
+            fit = self._evaluate(X)
+            improved = fit < pbest_fit
+            if np.any(improved):
+                pbest_pos[improved] = X[improved]
+                pbest_fit[improved] = fit[improved]
+
+            g_idx = int(np.argmin(pbest_fit))
+            if pbest_fit[g_idx] < gbest_fit:
+                gbest_fit = float(pbest_fit[g_idx])
+                gbest_pos = pbest_pos[g_idx].copy()
+
+            history_best.append(gbest_fit)
+
+            if self.on_progress:
+                self.on_progress({
+                    "iteration": t,
+                    "max_iterations": self.cfg.max_generations,
+                    "best_f": gbest_fit,
+                    "best_x": gbest_pos.tolist(),
+                    "history_best_f_tail": history_best[-10:],
+                    "population": X.copy(),
+                    "fitness": fit.copy(),
+                    "velocities": V.copy(),
+                })
+
+        return {
+            "best_x": gbest_pos.copy(),
+            "best_f": float(gbest_fit),
+            "history_best_f": history_best,
+            "final_positions": X.copy(),
+            "final_fitness": fit.copy(),
+            "final_velocities": V.copy(),
+        }
+
+    def _evaluate(self, X: np.ndarray) -> np.ndarray:
+
+        try:
+            vals = self.objective(X)
+            vals = np.asarray(vals, dtype=float)
+            if vals.shape == (X.shape[0],):
+                return vals
+        except Exception:
+            pass
+
+        return np.array([self.objective(ind) for ind in X], dtype=float)
+
+    def _inertia_weight(self, t: int) -> float:
+
+        T = max(1, self.cfg.max_generations - 1)
+        alpha = min(1.0, max(0.0, t / T))
+        return self.cfg.w_start + alpha * (self.cfg.w_end - self.cfg.w_start)
+
+
+if __name__ == "__main__":
+    from test_functions import sphere, rastrigin, ackley
+
+    n = 20
+    cfg = PSOConfig(
+        swarm_size=50,
+        dims=n,
+        bounds=[(-5.12, 5.12)] * n,
+        max_generations=200,
+        w_start=0.9,
+        w_end=0.4,
+        c1=2.0,
+        c2=2.0,
+        vmax_frac=0.2,
+        random_seed=42,
+    )
+
+    algo = PSO(cfg, objective=rastrigin)
+    res = algo.optimize()
+    print("Best f:", res["best_f"])
+    print("Best x first 5 dims:", res["best_x"][:5])
+\end{lstlisting}
+
+
+% Листинг 08: mobile/lib/app.dart
+\begin{lstlisting}[language=Dart, caption={Инициализация мобильного приложения, WebSocket-клиента и BLoC-провайдеров (mobile/lib/app.dart)}, label={lst:app-dart}]
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'core/ws/ws_client.dart';
+import 'features/connection/connection_screen.dart';
+import 'features/connection/connection_cubit.dart';
+
+class App extends StatelessWidget {
+  const App({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return RepositoryProvider(
+      create: (_) => WsClient(),
+      child: BlocProvider(
+        create: (ctx) => ConnectionCubit(ctx.read<WsClient>()),
+        child: MaterialApp(
+          title: 'Оптимизатор BBO',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            colorSchemeSeed: Colors.indigo,
+            brightness: Brightness.light,
+            useMaterial3: true,
+          ),
+          home: const ConnectionScreen(),
+        ),
+      ),
+    );
+  }
+}
+\end{lstlisting}
+
+
+% Листинг 09: mobile/lib/core/models/job_config.dart
+\begin{lstlisting}[language=Dart, caption={Модель конфигурации эксперимента и формирование JSON-задания (mobile/lib/core/models/job\_config.dart)}, label={lst:job-config-dart}]
+class ObjectiveConfig {
+  String kind;
+  String? name;
+  String? expr;
+  bool minimize;
+
+  ObjectiveConfig({
+    this.kind = 'builtin',
+    this.name = 'sphere',
+    this.expr,
+    this.minimize = true,
+  });
+
+  Map<String, dynamic> toJson() {
+    final map = <String, dynamic>{
+      'kind': kind,
+      'minimize': minimize,
+    };
+    if (kind == 'builtin') {
+      map['name'] = name;
+    } else if (kind == 'expression') {
+      map['expr'] = expr;
+    }
+    return map;
+  }
+}
+
+class BoundsConfig {
+  String kind;
+  double low;
+  double high;
+  List<List<double>>? items;
+
+  BoundsConfig({
+    this.kind = 'uniform',
+    this.low = -5.12,
+    this.high = 5.12,
+    this.items,
+  });
+
+  Map<String, dynamic> toJson() {
+    if (kind == 'uniform') {
+      return {'kind': 'uniform', 'low': low, 'high': high};
+    }
+    return {'kind': 'per_dim', 'items': items};
+  }
+}
+
+class ProblemConfig {
+  int dims;
+  BoundsConfig bounds;
+
+  ProblemConfig({this.dims = 10, BoundsConfig? bounds})
+      : bounds = bounds ?? BoundsConfig();
+
+  Map<String, dynamic> toJson() => {
+        'dims': dims,
+        'bounds': bounds.toJson(),
+      };
+}
+
+class StreamingInclude {
+  bool bestX;
+  bool bestF;
+  bool population;
+  bool fitness;
+  bool velocities;
+
+  StreamingInclude({
+    this.bestX = true,
+    this.bestF = true,
+    this.population = false,
+    this.fitness = false,
+    this.velocities = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'best_x': bestX,
+        'best_f': bestF,
+        'population': population,
+        'fitness': fitness,
+        'velocities': velocities,
+      };
+}
+
+class StreamingConfig {
+  String mode;
+  int everyK;
+  StreamingInclude include;
+
+  StreamingConfig({
+    this.mode = 'per_generation',
+    this.everyK = 1,
+    StreamingInclude? include,
+  }) : include = include ?? StreamingInclude();
+
+  Map<String, dynamic> toJson() => {
+        'mode': mode,
+        'every_k': everyK,
+        'include': include.toJson(),
+        'max_points': {'history_best_f': 5000},
+      };
+}
+
+class OutputConfig {
+  bool returnFinalPopulation;
+  bool returnFinalFitness;
+  bool returnFinalVelocities;
+
+  OutputConfig({
+    this.returnFinalPopulation = true,
+    this.returnFinalFitness = true,
+    this.returnFinalVelocities = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'return_final_population': returnFinalPopulation,
+        'return_final_fitness': returnFinalFitness,
+        'return_final_velocities': returnFinalVelocities,
+      };
+}
+
+class JobConfig {
+  ObjectiveConfig objective;
+  ProblemConfig problem;
+  String methodName;
+  Map<String, dynamic> methodConfig;
+  StreamingConfig streaming;
+  OutputConfig output;
+  String priority;
+  int timeoutMs;
+
+  JobConfig({
+    ObjectiveConfig? objective,
+    ProblemConfig? problem,
+    this.methodName = 'bbo.classic',
+    Map<String, dynamic>? methodConfig,
+    StreamingConfig? streaming,
+    OutputConfig? output,
+    this.priority = 'normal',
+    this.timeoutMs = 600000,
+  })  : objective = objective ?? ObjectiveConfig(),
+        problem = problem ?? ProblemConfig(),
+        methodConfig = methodConfig ?? {},
+        streaming = streaming ?? StreamingConfig(),
+        output = output ?? OutputConfig();
+
+  Map<String, dynamic> toSubmitPayload() => {
+        'job': {
+          'priority': priority,
+          'timeout_ms': timeoutMs,
+          'tags': ['mobile'],
+        },
+        'objective': objective.toJson(),
+        'problem': problem.toJson(),
+        'method': {
+          'name': methodName,
+          'config': methodConfig,
+        },
+        'streaming': streaming.toJson(),
+        'output': output.toJson(),
+      };
+}
+\end{lstlisting}
+
+
+% Листинг 10: mobile/lib/core/ws/ws_client.dart
+\begin{lstlisting}[language=Dart, caption={WebSocket-клиент мобильного приложения с поддержкой переподключения (mobile/lib/core/ws/ws\_client.dart)}, label={lst:ws-client-dart}]
+import 'dart:async';
+import 'dart:convert';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../protocol/envelope.dart';
+import '../protocol/message_types.dart';
+import '../protocol/models.dart';
+import 'ws_event.dart';
+
+class WsClient {
+  WebSocketChannel? _channel;
+  final _eventController = StreamController<WsEvent>.broadcast();
+  Timer? _pingTimer;
+  Timer? _pongTimeoutTimer;
+  Timer? _reconnectTimer;
+  Timer? _reconnectCountdownTimer;
+  String? _host;
+  int? _port;
+  bool _intentionalClose = false;
+  int _reconnectAttempts = 0;
+  bool _isReconnecting = false;
+  int _reconnectDelaySeconds = 0;
+  int _reconnectRemainingSeconds = 0;
+  bool _awaitingPong = false;
+  final List<Map<String, dynamic>> _pendingEnvelopes = [];
+  static const _maxReconnectDelay = 30;
+  static const _pingIntervalSeconds = 5;
+  static const _pongTimeoutSeconds = 10;
+
+  Stream<WsEvent> get events => _eventController.stream;
+  bool get isConnected => _channel != null;
+  bool get isReconnecting => _isReconnecting;
+  int get reconnectAttempt => _reconnectAttempts;
+  int get reconnectDelaySeconds => _reconnectDelaySeconds;
+  int get reconnectRemainingSeconds => _reconnectRemainingSeconds;
+
+  Future<void> connect(String host, int port) async {
+    _host = host;
+    _port = port;
+    _intentionalClose = false;
+    _reconnectAttempts = 0;
+    await _doConnect();
+  }
+
+  Future<void> _doConnect() async {
+    try {
+      final uri = Uri.parse('ws://$_host:$_port/ws/optimize');
+      _channel = WebSocketChannel.connect(uri);
+      await _channel!.ready;
+      _cancelReconnectTimers();
+      _reconnectAttempts = 0;
+      _eventController.add(WsConnected());
+
+      _channel!.stream.listen(
+        (data) => _onMessage(data as String),
+        onDone: _onDone,
+        onError: (e) => _onDone(),
+      );
+
+      _sendHello();
+    } catch (e) {
+      _channel = null;
+      _eventController.add(WsDisconnected(reason: e.toString()));
+      _scheduleReconnect();
+    }
+  }
+
+  void _sendHello() {
+    final envelope = buildEnvelope(
+      type: MessageTypes.hello,
+      payload: {
+        'client': {
+          'name': 'mobile-app',
+          'version': '1.0.0',
+          'platform': 'android',
+          'lang': 'dart',
+        },
+        'wants': {'progress_stream': true, 'chunking': true},
+      },
+      clientReqId: 'hello-1',
+    );
+    send(envelope);
+  }
+
+  void _onMessage(String raw) {
+    final envelope = parseEnvelope(raw);
+    final type = getType(envelope);
+    final payload = getPayload(envelope);
+
+    switch (type) {
+      case MessageTypes.hello:
+        _eventController.add(WsHelloReceived(ServerHello.fromPayload(payload)));
+        _flushPending();
+        _startPing();
+      case MessageTypes.ping:
+        _sendRaw(buildEnvelope(type: MessageTypes.pong, payload: {}));
+      case MessageTypes.jobAccepted:
+        _eventController.add(WsJobAccepted(JobAccepted.fromPayload(payload)));
+      case MessageTypes.jobQueued:
+        _eventController.add(WsJobQueued(JobQueued.fromPayload(payload)));
+      case MessageTypes.jobStarted:
+        _eventController.add(WsJobStarted(JobStarted.fromPayload(payload)));
+      case MessageTypes.jobProgress:
+        _eventController.add(WsJobProgress(JobProgress.fromPayload(payload)));
+      case MessageTypes.jobResult:
+        _eventController.add(WsJobResult(JobResult.fromPayload(payload)));
+      case MessageTypes.jobFinished:
+        _eventController.add(WsJobFinished(JobFinished.fromPayload(payload)));
+      case MessageTypes.jobStatus:
+        _eventController.add(WsJobStatus(JobStatus.fromPayload(payload)));
+      case MessageTypes.error:
+        _eventController.add(WsError(ProtocolError.fromPayload(payload)));
+      case MessageTypes.pong:
+        _awaitingPong = false;
+        _pongTimeoutTimer?.cancel();
+        _eventController.add(WsPong());
+    }
+  }
+
+  void _onDone() {
+    if (_channel == null) return;
+    _channel = null;
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
+    if (!_intentionalClose) {
+      _eventController.add(WsDisconnected(reason: 'Connection lost'));
+      _scheduleReconnect();
+    } else {
+      _eventController.add(WsDisconnected());
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (_intentionalClose || _host == null) return;
+    _cancelReconnectTimers();
+    _reconnectAttempts++;
+    final delay = _reconnectDelay();
+    var remaining = delay;
+    _isReconnecting = true;
+    _reconnectDelaySeconds = delay;
+    _reconnectRemainingSeconds = remaining;
+    _eventController.add(
+      WsReconnectScheduled(
+        attempt: _reconnectAttempts,
+        delaySeconds: delay,
+        remainingSeconds: remaining,
+      ),
+    );
+    _reconnectCountdownTimer = Timer.periodic(const Duration(seconds: 1), (
+      timer,
+    ) {
+      remaining--;
+      if (remaining <= 0) {
+        timer.cancel();
+        return;
+      }
+      _reconnectRemainingSeconds = remaining;
+      _eventController.add(
+        WsReconnectTick(
+          attempt: _reconnectAttempts,
+          delaySeconds: delay,
+          remainingSeconds: remaining,
+        ),
+      );
+    });
+    _reconnectTimer = Timer(Duration(seconds: delay), _doConnect);
+  }
+
+  int _reconnectDelay() {
+    final delay = 1 << (_reconnectAttempts - 1);
+    return delay > _maxReconnectDelay ? _maxReconnectDelay : delay;
+  }
+
+  void _startPing() {
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: _pingIntervalSeconds), (
+      _,
+    ) {
+      _sendPing();
+    });
+    _sendPing();
+  }
+
+  void _startPongTimeout() {
+    _pongTimeoutTimer?.cancel();
+    _pongTimeoutTimer = Timer(const Duration(seconds: _pongTimeoutSeconds), () {
+      _handleConnectionLost('Ping timeout');
+    });
+  }
+
+  void _sendPing() {
+    if (_channel == null || _awaitingPong) return;
+    _awaitingPong = true;
+    send(buildEnvelope(type: MessageTypes.ping, payload: {}));
+    _startPongTimeout();
+  }
+
+  void _handleConnectionLost(String reason) {
+    if (_channel == null || _intentionalClose) return;
+    _channel?.sink.close();
+    _channel = null;
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
+    _eventController.add(WsDisconnected(reason: reason));
+    _scheduleReconnect();
+  }
+
+  void send(Map<String, dynamic> envelope) {
+    if (_channel == null) {
+      _pendingEnvelopes.add(envelope);
+      return;
+    }
+    _sendRaw(envelope);
+  }
+
+  void _sendRaw(Map<String, dynamic> envelope) {
+    try {
+      _channel?.sink.add(jsonEncode(envelope));
+    } catch (_) {
+      _handleConnectionLost('Connection lost');
+    }
+  }
+
+  void _flushPending() {
+    if (_channel == null || _pendingEnvelopes.isEmpty) return;
+    final pending = List<Map<String, dynamic>>.from(_pendingEnvelopes);
+    _pendingEnvelopes.clear();
+    for (final envelope in pending) {
+      _channel!.sink.add(jsonEncode(envelope));
+    }
+  }
+
+  void _cancelReconnectTimers() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectCountdownTimer?.cancel();
+    _reconnectCountdownTimer = null;
+    _isReconnecting = false;
+    _reconnectDelaySeconds = 0;
+    _reconnectRemainingSeconds = 0;
+  }
+
+  void submitJob({
+    required String clientReqId,
+    required Map<String, dynamic> payload,
+  }) {
+    send(
+      buildEnvelope(
+        type: MessageTypes.jobSubmit,
+        payload: payload,
+        clientReqId: clientReqId,
+      ),
+    );
+  }
+
+  void removePendingByClientReqId(String clientReqId) {
+    _pendingEnvelopes.removeWhere((envelope) {
+      final header = envelope['header'] as Map<String, dynamic>?;
+      final trace = header?['trace'] as Map<String, dynamic>?;
+      return trace?['client_req_id'] == clientReqId;
+    });
+  }
+
+  void cancelJob(String jobId, String clientReqId) {
+    send(
+      buildEnvelope(
+        type: MessageTypes.cancel,
+        payload: {'job_id': jobId, 'reason': 'user_cancel'},
+        clientReqId: clientReqId,
+        jobId: jobId,
+      ),
+    );
+  }
+
+  void requestStatus(String jobId, String clientReqId) {
+    send(
+      buildEnvelope(
+        type: MessageTypes.jobStatusGet,
+        payload: {'job_id': jobId},
+        clientReqId: clientReqId,
+        jobId: jobId,
+      ),
+    );
+  }
+
+  Future<void> disconnect() async {
+    _intentionalClose = true;
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
+    _cancelReconnectTimers();
+    _pendingEnvelopes.clear();
+    await _channel?.sink.close();
+    _channel = null;
+  }
+
+  void dispose() {
+    _intentionalClose = true;
+    _pingTimer?.cancel();
+    _pongTimeoutTimer?.cancel();
+    _awaitingPong = false;
+    _cancelReconnectTimers();
+    _pendingEnvelopes.clear();
+    _channel?.sink.close();
+    _eventController.close();
+  }
+}
+\end{lstlisting}
+
+
+% Листинг 11: mobile/lib/features/configuration/config_cubit.dart
+\begin{lstlisting}[language=Dart, caption={Логика настройки эксперимента и валидации параметров (mobile/lib/features/configuration/config\_cubit.dart)}, label={lst:config-cubit-dart}]
+import 'package:equatable/equatable.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/models/job_config.dart';
+import '../../core/models/method_configs.dart';
+import '../../visualization/test_functions.dart';
+
+class ConfigState extends Equatable {
+  final JobConfig config;
+  final String? validationError;
+  final int _version;
+
+  const ConfigState({
+    required this.config,
+    this.validationError,
+    int version = 0,
+  }) : _version = version;
+
+  ConfigState copyWith({
+    JobConfig? config,
+    String? validationError,
+    int? version,
+  }) {
+    return ConfigState(
+      config: config ?? this.config,
+      validationError: validationError,
+      version: version ?? _version,
+    );
+  }
+
+  int get version => _version;
+
+  @override
+  List<Object?> get props => [_version, validationError];
+}
+
+class ConfigCubit extends Cubit<ConfigState> {
+  ConfigCubit() : super(ConfigState(config: _defaultConfig()));
+
+  static JobConfig _defaultConfig() {
+    final config = JobConfig();
+    config.methodConfig = createDefaultConfig(config.methodName);
+    return config;
+  }
+
+  void setObjectiveKind(String kind) {
+    state.config.objective.kind = kind;
+    _emitUpdated();
+  }
+
+  void setObjectiveName(String name) {
+    state.config.objective.name = name;
+    final pd = defaultBoundsPerDim[name];
+    if (pd != null) {
+      state.config.problem.dims = pd.length;
+      state.config.problem.bounds.kind = 'per_dim';
+      state.config.problem.bounds.items = pd.map((p) => [p[0], p[1]]).toList();
+    } else {
+      final b = defaultBoundsUniform[name];
+      if (b != null) {
+        state.config.problem.bounds.kind = 'uniform';
+        state.config.problem.bounds.low = b[0];
+        state.config.problem.bounds.high = b[1];
+        state.config.problem.bounds.items = null;
+      }
+    }
+    _emitUpdated();
+  }
+
+  void setExpression(String expr) {
+    state.config.objective.expr = expr;
+    final requiredDims = _requiredDimsFromExpression(expr);
+    if (requiredDims != null && requiredDims > state.config.problem.dims) {
+      _setDimsValue(requiredDims);
+    }
+    _emitUpdated();
+  }
+
+  void setMinimize(bool minimize) {
+    state.config.objective.minimize = minimize;
+    _emitUpdated();
+  }
+
+  void setDims(int dims) {
+    _setDimsValue(dims);
+    _emitUpdated();
+  }
+
+  void _setDimsValue(int dims) {
+    state.config.problem.dims = dims;
+    final b = state.config.problem.bounds;
+    if (b.kind == 'per_dim') {
+      final old = b.items ?? [];
+      b.items = List.generate(
+        dims,
+        (i) => i < old.length ? old[i] : [b.low, b.high],
+      );
+    }
+  }
+
+  void setBoundsKind(String kind) {
+    state.config.problem.bounds.kind = kind;
+    if (kind == 'per_dim' && state.config.problem.bounds.items == null) {
+      state.config.problem.bounds.items = List.generate(
+        state.config.problem.dims,
+        (_) => [
+          state.config.problem.bounds.low,
+          state.config.problem.bounds.high,
+        ],
+      );
+    }
+    _emitUpdated();
+  }
+
+  void setBoundsUniform(double low, double high) {
+    state.config.problem.bounds.low = low;
+    state.config.problem.bounds.high = high;
+    _emitUpdated();
+  }
+
+  void setBoundsPerDim(int index, double low, double high) {
+    state.config.problem.bounds.items?[index] = [low, high];
+    _emitUpdated();
+  }
+
+  void setMethod(String method) {
+    state.config.methodName = method;
+    state.config.methodConfig = createDefaultConfig(method);
+    if (!isPsoMethod(method)) {
+      state.config.streaming.include.velocities = false;
+      state.config.output.returnFinalVelocities = false;
+    }
+    _emitUpdated();
+  }
+
+  void setMethodConfigValue(String key, dynamic value) {
+    state.config.methodConfig[key] = value;
+    _emitUpdated();
+  }
+
+  void setStreamingMode(String mode) {
+    state.config.streaming.mode = mode;
+    _emitUpdated();
+  }
+
+  void setEveryK(int k) {
+    state.config.streaming.everyK = k;
+    _emitUpdated();
+  }
+
+  void setStreamingInclude(String field, bool value) {
+    final inc = state.config.streaming.include;
+    switch (field) {
+      case 'best_x':
+        inc.bestX = value;
+      case 'best_f':
+        inc.bestF = value;
+      case 'population':
+        inc.population = value;
+      case 'fitness':
+        inc.fitness = value;
+      case 'velocities':
+        inc.velocities = value;
+    }
+    _emitUpdated();
+  }
+
+  void setOutputFlag(String field, bool value) {
+    final out = state.config.output;
+    switch (field) {
+      case 'return_final_population':
+        out.returnFinalPopulation = value;
+      case 'return_final_fitness':
+        out.returnFinalFitness = value;
+      case 'return_final_velocities':
+        out.returnFinalVelocities = value;
+    }
+    _emitUpdated();
+  }
+
+  void setPriority(String priority) {
+    state.config.priority = priority;
+    _emitUpdated();
+  }
+
+  void applyPreset(String preset) {
+    final config = state.config;
+    switch (preset) {
+      case 'rastrigin_bbo':
+        config.objective.kind = 'builtin';
+        config.objective.name = 'rastrigin';
+        config.objective.minimize = true;
+        config.problem.dims = 10;
+        config.problem.bounds = BoundsConfig(low: -5.12, high: 5.12);
+        config.methodName = 'bbo.classic';
+        config.methodConfig = createDefaultConfig('bbo.classic');
+      case 'sphere_pso':
+        config.objective.kind = 'builtin';
+        config.objective.name = 'sphere';
+        config.objective.minimize = true;
+        config.problem.dims = 10;
+        config.problem.bounds = BoundsConfig(low: -5.12, high: 5.12);
+        config.methodName = 'pso';
+        config.methodConfig = createDefaultConfig('pso');
+      case 'ackley_modified':
+        config.objective.kind = 'builtin';
+        config.objective.name = 'ackley';
+        config.objective.minimize = true;
+        config.problem.dims = 10;
+        config.problem.bounds = BoundsConfig(low: -5.0, high: 5.0);
+        config.methodName = 'bbo.classic.modified';
+        config.methodConfig = createDefaultConfig('bbo.classic.modified');
+    }
+    _emitUpdated();
+  }
+
+  String? validate() {
+    final c = state.config;
+    if (c.objective.kind == 'expression' &&
+        (c.objective.expr == null || c.objective.expr!.isEmpty)) {
+      return 'Необходимо ввести выражение';
+    }
+    if (c.objective.kind == 'expression' && c.objective.expr != null) {
+      final requiredDims = _requiredDimsFromExpression(c.objective.expr!);
+      if (requiredDims != null && requiredDims > c.problem.dims) {
+        return 'Выражение использует x${requiredDims - 1}, поэтому размерность должна быть не меньше $requiredDims';
+      }
+    }
+    if (c.problem.dims < 1 || c.problem.dims > 100) {
+      return 'Размерность должна быть от 1 до 100';
+    }
+    if (c.objective.name == 'bukin6' && c.problem.dims != 2) {
+      return 'Bukin N.6 требует 2 измерения';
+    }
+    if (c.problem.bounds.kind == 'uniform' &&
+        c.problem.bounds.low >= c.problem.bounds.high) {
+      return 'Нижняя граница должна быть меньше верхней';
+    }
+    final mc = c.methodConfig;
+    final maxGen = mc['max_generations'] as int? ?? 200;
+    if (maxGen < 1 || maxGen > 10000) {
+      return 'Макс. поколений должно быть от 1 до 10 000';
+    }
+    if (isPsoMethod(c.methodName)) {
+      if ((mc['swarm_size'] as num?) != null && (mc['swarm_size'] as num) < 2) {
+        return 'Размер роя должен быть >= 2';
+      }
+    } else {
+      if ((mc['pop_size'] as num?) != null && (mc['pop_size'] as num) < 2) {
+        return 'Размер популяции должен быть >= 2';
+      }
+    }
+    return null;
+  }
+
+  void _emitUpdated() {
+    emit(ConfigState(config: state.config, version: state.version + 1));
+  }
+
+  int? _requiredDimsFromExpression(String expr) {
+    final matches = RegExp(r'\bx(\d+)\b').allMatches(expr);
+    int? maxIndex;
+    for (final match in matches) {
+      final index = int.tryParse(match.group(1)!);
+      if (index != null && (maxIndex == null || index > maxIndex)) {
+        maxIndex = index;
+      }
+    }
+    return maxIndex == null ? null : maxIndex + 1;
+  }
+}
+\end{lstlisting}
+
+
+% Листинг 12: mobile/lib/features/progress/progress_cubit.dart
+\begin{lstlisting}[language=Dart, caption={Обработка прогресса выполнения и накопление истории сходимости (mobile/lib/features/progress/progress\_cubit.dart)}, label={lst:progress-cubit-dart}]
+import 'dart:async';
+import 'package:equatable/equatable.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../core/models/job_config.dart';
+import '../../core/protocol/models.dart';
+import '../../core/ws/ws_client.dart';
+import '../../core/ws/ws_event.dart';
+
+enum JobPhase {
+  submitting,
+  queued,
+  started,
+  running,
+  succeeded,
+  failed,
+  cancelled,
+  timeout,
+}
+
+class ProgressState extends Equatable {
+  final JobPhase phase;
+  final String? jobId;
+  final int iteration;
+  final int maxIterations;
+  final double? bestF;
+  final List<double>? bestX;
+  final List<double> historyBestF;
+  final List<double?> liveHistoryBestF;
+  final List<double>? fitness;
+  final List<List<double>> historyBestX;
+  final int elapsedMs;
+  final int? queuePosition;
+  final int? queueEtaMs;
+  final JobResult? result;
+  final String? errorMessage;
+  final bool isReconnecting;
+  final int reconnectAttempt;
+  final int reconnectDelaySeconds;
+  final int reconnectRemainingSeconds;
+
+  const ProgressState({
+    this.phase = JobPhase.submitting,
+    this.jobId,
+    this.iteration = 0,
+    this.maxIterations = 1,
+    this.bestF,
+    this.bestX,
+    this.historyBestF = const [],
+    this.liveHistoryBestF = const [],
+    this.fitness,
+    this.historyBestX = const [],
+    this.elapsedMs = 0,
+    this.queuePosition,
+    this.queueEtaMs,
+    this.result,
+    this.errorMessage,
+    this.isReconnecting = false,
+    this.reconnectAttempt = 0,
+    this.reconnectDelaySeconds = 0,
+    this.reconnectRemainingSeconds = 0,
+  });
+
+  ProgressState copyWith({
+    JobPhase? phase,
+    String? jobId,
+    int? iteration,
+    int? maxIterations,
+    double? bestF,
+    List<double>? bestX,
+    List<double>? historyBestF,
+    List<double?>? liveHistoryBestF,
+    List<double>? fitness,
+    List<List<double>>? historyBestX,
+    int? elapsedMs,
+    int? queuePosition,
+    int? queueEtaMs,
+    JobResult? result,
+    String? errorMessage,
+    bool? isReconnecting,
+    int? reconnectAttempt,
+    int? reconnectDelaySeconds,
+    int? reconnectRemainingSeconds,
+  }) {
+    return ProgressState(
+      phase: phase ?? this.phase,
+      jobId: jobId ?? this.jobId,
+      iteration: iteration ?? this.iteration,
+      maxIterations: maxIterations ?? this.maxIterations,
+      bestF: bestF ?? this.bestF,
+      bestX: bestX ?? this.bestX,
+      historyBestF: historyBestF ?? this.historyBestF,
+      liveHistoryBestF: liveHistoryBestF ?? this.liveHistoryBestF,
+      fitness: fitness ?? this.fitness,
+      historyBestX: historyBestX ?? this.historyBestX,
+      elapsedMs: elapsedMs ?? this.elapsedMs,
+      queuePosition: queuePosition ?? this.queuePosition,
+      queueEtaMs: queueEtaMs ?? this.queueEtaMs,
+      result: result ?? this.result,
+      errorMessage: errorMessage ?? this.errorMessage,
+      isReconnecting: isReconnecting ?? this.isReconnecting,
+      reconnectAttempt: reconnectAttempt ?? this.reconnectAttempt,
+      reconnectDelaySeconds:
+          reconnectDelaySeconds ?? this.reconnectDelaySeconds,
+      reconnectRemainingSeconds:
+          reconnectRemainingSeconds ?? this.reconnectRemainingSeconds,
+    );
+  }
+
+  double get progress => maxIterations > 0 ? iteration / maxIterations : 0;
+
+  @override
+  List<Object?> get props => [
+    phase,
+    jobId,
+    iteration,
+    maxIterations,
+    bestF,
+    historyBestF.length,
+    liveHistoryBestF.length,
+    fitness,
+    historyBestX.length,
+    elapsedMs,
+    queuePosition,
+    result,
+    errorMessage,
+    isReconnecting,
+    reconnectAttempt,
+    reconnectDelaySeconds,
+    reconnectRemainingSeconds,
+  ];
+}
+
+class ProgressCubit extends Cubit<ProgressState> {
+  final WsClient _ws;
+  final JobConfig config;
+  final String _clientReqId;
+  StreamSubscription? _sub;
+  bool _hadConnectionGap = false;
+
+  ProgressCubit(this._ws, this.config, {required String clientReqId})
+    : _clientReqId = clientReqId,
+      super(
+        ProgressState(
+          isReconnecting: _ws.isReconnecting,
+          reconnectAttempt: _ws.reconnectAttempt,
+          reconnectDelaySeconds: _ws.reconnectDelaySeconds,
+          reconnectRemainingSeconds: _ws.reconnectRemainingSeconds,
+        ),
+      ) {
+    _sub = _ws.events.listen(_onEvent);
+    _ws.submitJob(clientReqId: clientReqId, payload: config.toSubmitPayload());
+  }
+
+  void _onEvent(WsEvent event) {
+    switch (event) {
+      case WsConnected():
+        emit(state.copyWith(isReconnecting: false));
+      case WsHelloReceived():
+        emit(state.copyWith(isReconnecting: false));
+        final jobId = state.jobId;
+        if (jobId != null && !_isTerminal(state.phase)) {
+          _ws.requestStatus(jobId, _clientReqId);
+        }
+      case WsReconnectScheduled(
+        :final attempt,
+        :final delaySeconds,
+        :final remainingSeconds,
+      ):
+        _hadConnectionGap = true;
+        emit(
+          state.copyWith(
+            isReconnecting: true,
+            reconnectAttempt: attempt,
+            reconnectDelaySeconds: delaySeconds,
+            reconnectRemainingSeconds: remainingSeconds,
+          ),
+        );
+      case WsReconnectTick(
+        :final attempt,
+        :final delaySeconds,
+        :final remainingSeconds,
+      ):
+        emit(
+          state.copyWith(
+            isReconnecting: true,
+            reconnectAttempt: attempt,
+            reconnectDelaySeconds: delaySeconds,
+            reconnectRemainingSeconds: remainingSeconds,
+          ),
+        );
+      case WsJobAccepted(:final data):
+        emit(
+          state.copyWith(
+            jobId: data.jobId,
+            phase: JobPhase.queued,
+            queuePosition: data.queue?.position,
+            queueEtaMs: data.queue?.etaMs,
+          ),
+        );
+      case WsJobQueued(:final data):
+        emit(
+          state.copyWith(
+            queuePosition: data.queue.position,
+            queueEtaMs: data.queue.etaMs,
+          ),
+        );
+      case WsJobStarted(:final data):
+        emit(state.copyWith(jobId: data.jobId, phase: JobPhase.started));
+      case WsJobProgress(:final data):
+        _emitProgress(data.progress, snapshots: data.snapshots);
+      case WsJobResult(:final data):
+        emit(
+          state.copyWith(
+            result: data,
+            bestF: data.result.bestF,
+            bestX: data.result.bestX,
+            historyBestF: data.result.historyBestF,
+          ),
+        );
+      case WsJobFinished(:final data):
+        final phase = _phaseFromServerState(data.finalState);
+        emit(state.copyWith(phase: phase));
+      case WsJobStatus(:final data):
+        final phase = _phaseFromServerState(data.state);
+        if (data.progress != null) {
+          _emitProgress(data.progress!, phase: phase);
+        } else {
+          emit(
+            state.copyWith(
+              jobId: data.jobId,
+              phase: phase,
+              queuePosition: data.queue?.position,
+              queueEtaMs: data.queue?.etaMs,
+            ),
+          );
+        }
+      case WsError(:final error):
+        emit(
+          state.copyWith(phase: JobPhase.failed, errorMessage: error.message),
+        );
+      default:
+        break;
+    }
+  }
+
+  void _emitProgress(
+    ProgressData progress, {
+    JobPhase phase = JobPhase.running,
+    ProgressSnapshots? snapshots,
+  }) {
+    final previousIteration = state.iteration;
+    final newHistory = List<double>.from(state.historyBestF);
+    final newLiveHistory = List<double?>.from(state.liveHistoryBestF);
+    if (progress.historyBestFTail != null) {
+      final tail = progress.historyBestFTail!;
+      final tailStartIteration = progress.iteration - tail.length + 1;
+      if (_hadConnectionGap && state.iteration > 0) {
+        final missedPoints = tailStartIteration - previousIteration - 1;
+        if (missedPoints > 0) {
+          newLiveHistory.addAll(List<double?>.filled(missedPoints, null));
+        }
+      }
+      for (var i = 0; i < tail.length; i++) {
+        final iteration = tailStartIteration + i;
+        if (newHistory.isEmpty || iteration > previousIteration) {
+          final v = tail[i];
+          newHistory.add(v);
+          newLiveHistory.add(v);
+        }
+      }
+    } else if (progress.bestF != null &&
+        (newHistory.isEmpty || progress.iteration > previousIteration)) {
+      if (_hadConnectionGap && state.iteration > 0) {
+        final missedPoints = progress.iteration - previousIteration - 1;
+        if (missedPoints > 0) {
+          newLiveHistory.addAll(List<double?>.filled(missedPoints, null));
+        }
+      }
+      newHistory.add(progress.bestF!);
+      newLiveHistory.add(progress.bestF!);
+    }
+    final fitness = snapshots?.fitness;
+    final newHistoryX = List<List<double>>.from(state.historyBestX);
+    if (progress.bestX != null) {
+      newHistoryX.add(List<double>.from(progress.bestX!));
+    }
+    _hadConnectionGap = false;
+    emit(
+      state.copyWith(
+        phase: phase,
+        iteration: progress.iteration,
+        maxIterations: progress.maxIterations,
+        bestF: progress.bestF,
+        bestX: progress.bestX,
+        historyBestF: newHistory,
+        liveHistoryBestF: newLiveHistory,
+        fitness: fitness,
+        historyBestX: newHistoryX,
+        elapsedMs: progress.elapsedMs,
+      ),
+    );
+  }
+
+  JobPhase _phaseFromServerState(String value) {
+    return switch (value) {
+      'queued' => JobPhase.queued,
+      'started' => JobPhase.started,
+      'running' => JobPhase.running,
+      'succeeded' => JobPhase.succeeded,
+      'failed' => JobPhase.failed,
+      'cancelled' => JobPhase.cancelled,
+      'timeout' => JobPhase.timeout,
+      _ => JobPhase.failed,
+    };
+  }
+
+  bool _isTerminal(JobPhase phase) {
+    return phase == JobPhase.succeeded ||
+        phase == JobPhase.failed ||
+        phase == JobPhase.cancelled ||
+        phase == JobPhase.timeout;
+  }
+
+  void cancelJob() {
+    final jobId = state.jobId;
+    if (jobId == null) {
+      _ws.removePendingByClientReqId(_clientReqId);
+      emit(
+        state.copyWith(
+          phase: JobPhase.cancelled,
+          errorMessage: 'Задача ещё не принята сервером',
+        ),
+      );
+      return;
+    }
+    _ws.cancelJob(jobId, 'cancel-$jobId');
+  }
+
+  @override
+  Future<void> close() {
+    _sub?.cancel();
+    return super.close();
+  }
+}
+\end{lstlisting}
+
+
+% Листинг 13: mobile/lib/storage/database.dart
+\begin{lstlisting}[language=Dart, caption={Локальное хранение результатов экспериментов (mobile/lib/storage/database.dart)}, label={lst:database-dart}]
+import 'package:sqflite/sqflite.dart';
+import 'package:path_provider/path_provider.dart';
+import '../core/models/job_result.dart';
+
+class AppDatabase {
+  static Database? _db;
+
+  static Future<Database> get database async {
+    _db ??= await _open();
+    return _db!;
+  }
+
+  static Future<Database> _open() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final path = '${dir.path}/optimizer.db';
+    return openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE job_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            method TEXT NOT NULL,
+            objective_name TEXT NOT NULL,
+            objective_kind TEXT NOT NULL,
+            dims INTEGER NOT NULL,
+            best_f REAL NOT NULL,
+            status TEXT NOT NULL,
+            result_json TEXT,
+            metrics_json TEXT,
+            config_json TEXT,
+            created_at TEXT NOT NULL
+          )
+        ''');
+      },
+    );
+  }
+
+  static Future<int> insertResult(SavedJobResult result) async {
+    final db = await database;
+    return db.insert('job_results', result.toDbMap());
+  }
+
+  static Future<List<SavedJobResult>> getAllResults() async {
+    final db = await database;
+    final maps =
+        await db.query('job_results', orderBy: 'created_at DESC');
+    return maps.map(SavedJobResult.fromDbMap).toList();
+  }
+
+  static Future<List<SavedJobResult>> getResultsByFilter({
+    String? method,
+    String? objectiveName,
+    String? status,
+  }) async {
+    final db = await database;
+    final where = <String>[];
+    final args = <dynamic>[];
+    if (method != null) {
+      where.add('method = ?');
+      args.add(method);
+    }
+    if (objectiveName != null) {
+      where.add('objective_name = ?');
+      args.add(objectiveName);
+    }
+    if (status != null) {
+      where.add('status = ?');
+      args.add(status);
+    }
+    final maps = await db.query(
+      'job_results',
+      where: where.isEmpty ? null : where.join(' AND '),
+      whereArgs: args.isEmpty ? null : args,
+      orderBy: 'created_at DESC',
+    );
+    return maps.map(SavedJobResult.fromDbMap).toList();
+  }
+
+  static Future<SavedJobResult?> getResultById(int id) async {
+    final db = await database;
+    final maps =
+        await db.query('job_results', where: 'id = ?', whereArgs: [id]);
+    if (maps.isEmpty) return null;
+    return SavedJobResult.fromDbMap(maps.first);
+  }
+
+  static Future<void> deleteResult(int id) async {
+    final db = await database;
+    await db.delete('job_results', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteAll() async {
+    final db = await database;
+    await db.delete('job_results');
+  }
+}
+\end{lstlisting}
+
+
+% Листинг 14: mobile/lib/visualization/surface_3d_painter.dart
+\begin{lstlisting}[language=Dart, caption={Отрисовка 3D-поверхности, траектории поиска и найденного решения (mobile/lib/visualization/surface\_3d\_painter.dart)}, label={lst:surface-3d-painter-dart}]
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'color_maps.dart';
+
+typedef TestFunction3D = double Function(List<double> x);
+
+class _Face {
+  final Offset a, b, c, d;
+  final double depth;
+  final Color color;
+
+  _Face(this.a, this.b, this.c, this.d, this.depth, this.color);
+}
+
+class Surface3DPainter extends CustomPainter {
+  final TestFunction3D function;
+  final double xMin, xMax, yMin, yMax;
+  final int resolution;
+  final double rotX;
+  final double rotZ;
+  final int dimX;
+  final int dimY;
+
+  final List<List<double>>? historyBestX;
+
+  final List<double>? bestPoint;
+
+  Surface3DPainter({
+    required this.function,
+    required this.xMin,
+    required this.xMax,
+    required this.yMin,
+    required this.yMax,
+    this.resolution = 50,
+    this.rotX = -0.6,
+    this.rotZ = 0.8,
+    this.dimX = 0,
+    this.dimY = 1,
+    this.historyBestX,
+    this.bestPoint,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final sw = size.width;
+    final sh = size.height;
+    final cx = sw / 2;
+    final cy = sh / 2;
+    final scale = min(sw, sh) * 0.38;
+
+    final n = resolution;
+    final grid = List.generate(n + 1, (_) => List<double>.filled(n + 1, 0.0));
+    double fMin = double.infinity;
+    double fMax = double.negativeInfinity;
+
+    for (int i = 0; i <= n; i++) {
+      final xVal = xMin + (xMax - xMin) * i / n;
+      for (int j = 0; j <= n; j++) {
+        final yVal = yMin + (yMax - yMin) * j / n;
+        final point = _makePoint(xVal, yVal);
+        final f = function(point);
+        grid[i][j] = f;
+        if (f < fMin) fMin = f;
+        if (f > fMax) fMax = f;
+      }
+    }
+
+    final fRange = fMax - fMin;
+    if (fRange == 0) return;
+
+    final cosX = cos(rotX), sinX = sin(rotX);
+    final cosZ = cos(rotZ), sinZ = sin(rotZ);
+
+    Offset project(double px, double py, double pz) {
+      final nx = 2 * (px - xMin) / (xMax - xMin) - 1;
+      final ny = 2 * (py - yMin) / (yMax - yMin) - 1;
+      final nz = 2 * (pz - fMin) / fRange - 1;
+
+      final rx = nx * cosZ - ny * sinZ;
+      final ry = nx * sinZ + ny * cosZ;
+      final rz = nz;
+
+      final ry2 = ry * cosX - rz * sinX;
+
+      return Offset(cx + rx * scale, cy - ry2 * scale);
+    }
+
+    double depth(double px, double py, double pz) {
+      final nx = 2 * (px - xMin) / (xMax - xMin) - 1;
+      final ny = 2 * (py - yMin) / (yMax - yMin) - 1;
+      final nz = 2 * (pz - fMin) / fRange - 1;
+
+      final ry = nx * sinZ + ny * cosZ;
+
+      return ry * sinX + nz * cosX;
+    }
+
+    final faces = <_Face>[];
+
+    for (int i = 0; i < n; i++) {
+      final x0 = xMin + (xMax - xMin) * i / n;
+      final x1 = xMin + (xMax - xMin) * (i + 1) / n;
+      for (int j = 0; j < n; j++) {
+        final y0 = yMin + (yMax - yMin) * j / n;
+        final y1 = yMin + (yMax - yMin) * (j + 1) / n;
+
+        final f00 = grid[i][j];
+        final f10 = grid[i + 1][j];
+        final f11 = grid[i + 1][j + 1];
+        final f01 = grid[i][j + 1];
+
+        final a = project(x0, y0, f00);
+        final b = project(x1, y0, f10);
+        final c = project(x1, y1, f11);
+        final d = project(x0, y1, f01);
+
+        final avgF = (f00 + f10 + f11 + f01) / 4;
+        final t = _logScale(avgF, fMin, fRange);
+        final color = ColorMaps.viridis(t);
+
+        final avgDepth = (depth(x0, y0, f00) + depth(x1, y0, f10) +
+                depth(x1, y1, f11) + depth(x0, y1, f01)) /
+            4;
+
+        faces.add(_Face(a, b, c, d, avgDepth, color));
+      }
+    }
+
+    faces.sort((a, b) => a.depth.compareTo(b.depth));
+
+    final paint = Paint()..style = PaintingStyle.fill;
+    final edgePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.3
+      ..color = Colors.black26;
+
+    for (final face in faces) {
+      final path = Path()
+        ..moveTo(face.a.dx, face.a.dy)
+        ..lineTo(face.b.dx, face.b.dy)
+        ..lineTo(face.c.dx, face.c.dy)
+        ..lineTo(face.d.dx, face.d.dy)
+        ..close();
+
+      paint.color = face.color;
+      canvas.drawPath(path, paint);
+      canvas.drawPath(path, edgePaint);
+    }
+
+    _drawAxes(canvas, size, project, cx, cy, scale);
+
+    if (historyBestX != null && historyBestX!.isNotEmpty) {
+      final pathPaint = Paint()
+        ..color = Colors.red.withValues(alpha: 0.9)
+        ..strokeWidth = 2.0
+        ..style = PaintingStyle.stroke;
+
+      final dotPaint = Paint()
+        ..color = Colors.red
+        ..style = PaintingStyle.fill;
+
+      final path = _samplePath(historyBestX!, 60);
+
+      Offset? prev;
+      for (final pt in path) {
+        if (pt.length <= max(dimX, dimY)) continue;
+        final px = pt[dimX];
+        final py = pt[dimY];
+        if (px < xMin || px > xMax || py < yMin || py > yMax) continue;
+        final fVal = function(_makePoint(px, py));
+        final projected = project(px, py, fVal);
+
+        if (prev != null) {
+          canvas.drawLine(prev, projected, pathPaint);
+        }
+        canvas.drawCircle(projected, 3.0, dotPaint);
+        prev = projected;
+      }
+    }
+
+    if (bestPoint != null && bestPoint!.length > max(dimX, dimY)) {
+      final bx = bestPoint![dimX];
+      final by = bestPoint![dimY];
+      if (bx >= xMin && bx <= xMax && by >= yMin && by <= yMax) {
+        final fVal = function(_makePoint(bx, by));
+        final projected = project(bx, by, fVal);
+        _drawStar(canvas, projected, 10, Colors.yellow, Colors.red);
+      }
+    }
+  }
+
+  List<double> _makePoint(double xVal, double yVal) {
+    final dims = max(dimX, dimY) + 1;
+    final point = List<double>.filled(max(dims, 2), 0.0);
+    if (bestPoint != null) {
+      for (int i = 0; i < min(bestPoint!.length, point.length); i++) {
+        point[i] = bestPoint![i];
+      }
+    }
+    point[dimX] = xVal;
+    point[dimY] = yVal;
+    return point;
+  }
+
+  double _logScale(double val, double fMin, double fRange) {
+    final shifted = val - fMin;
+    if (fRange <= 0) return 0;
+    return log(shifted + 1) / log(fRange + 1);
+  }
+
+  List<List<double>> _samplePath(List<List<double>> full, int maxPoints) {
+    if (full.length <= maxPoints) return full;
+    final step = full.length / maxPoints;
+    return List.generate(maxPoints, (i) => full[(i * step).floor()]);
+  }
+
+  void _drawAxes(Canvas canvas, Size size, Offset Function(double, double, double) project,
+      double cx, double cy, double scale) {
+    final tp = TextPainter(textDirection: TextDirection.ltr);
+
+    void drawLabel(String text, Offset pos) {
+      tp.text = TextSpan(
+        text: text,
+        style: const TextStyle(color: Colors.black87, fontSize: 12, fontWeight: FontWeight.w600),
+      );
+      tp.layout();
+      tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
+    }
+
+    final xEnd = project(xMax, yMin, 0);
+    drawLabel('x$dimX', Offset(xEnd.dx, xEnd.dy + 14));
+
+    final yEnd = project(xMin, yMax, 0);
+    drawLabel('x$dimY', Offset(yEnd.dx - 14, yEnd.dy));
+  }
+
+  void _drawStar(Canvas canvas, Offset center, double r, Color fill, Color stroke) {
+    final path = Path();
+    for (int i = 0; i < 10; i++) {
+      final radius = i.isEven ? r : r / 2.5;
+      final angle = -pi / 2 + i * pi / 5;
+      final point = Offset(center.dx + radius * cos(angle), center.dy + radius * sin(angle));
+      if (i == 0) {
+        path.moveTo(point.dx, point.dy);
+      } else {
+        path.lineTo(point.dx, point.dy);
+      }
+    }
+    path.close();
+    canvas.drawPath(path, Paint()..color = fill..style = PaintingStyle.fill);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = stroke
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant Surface3DPainter old) =>
+      old.rotX != rotX || old.rotZ != rotZ || old.resolution != resolution;
+}
+\end{lstlisting}

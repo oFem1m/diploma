@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 
-# ── Header sub-models ──────────────────────────────────────────────
+
 
 class AuthScheme(str, Enum):
     none = "none"
@@ -57,7 +57,7 @@ class Envelope(BaseModel):
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
-# ── Payload: hello ─────────────────────────────────────────────────
+
 
 class ClientInfo(BaseModel):
     name: str = "unknown"
@@ -93,7 +93,7 @@ class HelloServerPayload(BaseModel):
     capabilities: Capabilities
 
 
-# ── Payload: job.submit ────────────────────────────────────────────
+
 
 class Priority(str, Enum):
     low = "low"
@@ -115,11 +115,11 @@ class ObjectiveKind(str, Enum):
 
 class Objective(BaseModel):
     kind: ObjectiveKind
-    name: Optional[str] = None          # for builtin
-    expr: Optional[str] = None          # for expression
-    code: Optional[str] = None          # for code_python
-    entrypoint: Optional[str] = None    # for code_python
-    expects: Optional[str] = None       # for code_python: "batch"|"single"
+    name: Optional[str] = None
+    expr: Optional[str] = None
+    code: Optional[str] = None
+    entrypoint: Optional[str] = None
+    expects: Optional[str] = None
     minimize: bool = True
 
 
@@ -189,8 +189,6 @@ class JobSubmitPayload(BaseModel):
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
 
-
-# ── Payload: server responses ──────────────────────────────────────
 
 class QueueInfo(BaseModel):
     position: int
@@ -267,8 +265,6 @@ class JobFinishedPayload(BaseModel):
     finished_at: str
 
 
-# ── Payload: error ─────────────────────────────────────────────────
-
 class ErrorCode(str, Enum):
     BAD_REQUEST = "BAD_REQUEST"
     VALIDATION_ERROR = "VALIDATION_ERROR"
@@ -290,14 +286,10 @@ class ErrorPayload(BaseModel):
     retryable: bool = False
 
 
-# ── Payload: cancel ────────────────────────────────────────────────
-
 class CancelPayload(BaseModel):
     job_id: str
     reason: str = "user_cancel"
 
-
-# ── Payload: job.status ────────────────────────────────────────────
 
 class JobStatusGetPayload(BaseModel):
     job_id: str
